@@ -1,0 +1,102 @@
+-- Cache miss benchmark to test out-of-order execution.
+module(...,package.seeall)
+
+ffi = require("ffi")
+C   = ffi.C
+pmu = require("lib.pmu")
+
+local dasm = require("dasm")
+
+|.arch x64
+|.actionlist actions
+
+-- Create a big array. Each element contains a random index of another element.
+local elems = 100e6
+local mem = ffi.new("uint64_t[?]", elems)
+for i = 0, elems-1 do
+   mem[i] = math.random(elems)
+end
+
+local niterations = 100e6
+
+function gen_p1 (Dst)
+   | mov rcx, niterations
+   | mov64 rsi, mem
+   | mov r8, 0
+   |1:
+   | mov r8, [rsi+r8*8]
+   -- (hack) add some "entropy" from the loop counter to avoid getting
+   -- stuck in a loop on the table that would fit in L1/L2. (That does
+   -- happen if you remove this instruction: PMU shows L1/L2 hits.)
+   | xor r8b, cl
+   | sub rcx, 1
+   | jnz <1
+   | ret
+end
+
+function gen_p2 (Dst)
+   | mov rcx, niterations
+   | mov rsi, mem
+   | mov r8, 0
+   | mov r9, 1
+   |1:
+   | mov r8, [rsi+r8*8]
+   | mov r9, [rsi+r9*8]
+   | xor r8b, cl
+   | xor r9b, cl
+   | sub rcx, 2
+   | jnz <1
+   | ret
+end
+
+function gen_p4 (Dst)
+   | mov rcx, niterations
+   | mov rsi, mem
+   | mov r8, 0
+   | mov r9, 1
+   | mov r10, 2
+   | mov r11, 3
+   |1:
+   | mov r8, [rsi+r8*8]
+   | mov r9, [rsi+r9*8]
+   | mov r10, [rsi+r10*8]
+   | mov r11, [rsi+r11*8]
+   | xor r8b, cl
+   | xor r9b, cl
+   | xor r10b, cl
+   | xor r11b, cl
+   | sub rcx, 4
+   | jnz <1
+   | ret
+end
+
+anchor = {}
+
+-- Utility: assemble code and optionally dump disassembly.
+function assemble (name, prototype, generator)
+   local Dst = dasm.new(actions)
+   generator(Dst)
+   local mcode, size = Dst:build()
+   table.insert(anchor, mcode)
+   if debug then
+      print("mcode dump: "..name)
+      dasm.dump(mcode, size)
+   end
+   return ffi.cast(prototype, mcode)
+end
+
+events = {"mem_load_uops_retired.l1_hit",
+          "mem_load_uops_retired.l2_hit",
+          "mem_load_uops_retired.l3_hit",
+          "mem_load_uops_retired.l3_miss"}
+
+print("p1")
+p1 = assemble("p1", "void(*)()", gen_p1)
+pmu.profile(p1, events, {loop=niterations})
+print("p2")
+p2 = assemble("p2", "void(*)()", gen_p2)
+pmu.profile(p2, events, {loop=niterations})
+print("p4")
+p4 = assemble("p4", "void(*)()", gen_p4)
+pmu.profile(p4, events, {loop=niterations})
+print("done")
