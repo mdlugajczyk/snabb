@@ -48,7 +48,7 @@ TESTSCRIPTS = $(shell find . -name "selftest.sh" -executable | xargs)
 
 PATH := ../lib/luajit/usr/local/bin:$(PATH)
 
-snabb: $(LUAOBJ) $(PFLUAOBJ) $(HOBJ) $(COBJ) $(ARCHOBJ) $(ASMOBJ) $(INCOBJ) $(LUAJIT_A)
+snabb: $(LUAOBJ) $(PFLUAOBJ) $(HOBJ) $(COBJ) $(ARCHOBJ) $(ASMOBJ) $(INCOBJ) $(LUAJIT_A) obj/arch/aes/gcm_avx_gen4.o
 	$(E) "LINK      $@"
 	$(Q) gcc $(DEBUG) -Wl,--no-as-needed -Wl,-E -Werror -Wall -o $@ $^ \
 	    ../lib/luajit/src/libluajit.a \
@@ -134,6 +134,11 @@ obj/arch/avx2_c.o: arch/avx2.c Makefile
 obj/arch/sse2_c.o: arch/sse2.c Makefile
 	$(E) "C(SSE2)   $@"
 	$(Q) gcc -O2 -msse2 $(DEBUG) -Wl,-E -I ../lib/luajit/src -I . -include $(CURDIR)/../gcc-preinclude.h -c -Wall -Werror -o $@ $<
+
+obj/arch/aes/gcm_avx_gen4.o: arch/aes/gcm_avx_gen4.asm arch/aes/gcm_avx_gen4.asm arch/aes/gcm_defines.asm
+	$(E) "YASM      $@"
+	$(Q) yasm -f x64 -f elf64 -X gnu -g dwarf2 -o $@ $<
+
 
 $(HOBJ): obj/%_h.o: %.h Makefile | $(OBJDIR)
 	$(E) "H         $@"
