@@ -7,7 +7,8 @@
     nixpkgs.stdenv.mkDerivation {
       name = "manual";
       builder = ''
-        echo "doc manual $out/share/doc/snabbswitch.pdf" \
+        mkdir -p $out/nix-support
+        echo "doc-pdf manual $out/share/doc/snabbswitch.pdf" \
           >> $out/nix-support/hydra-build-products;
       '';
     };
