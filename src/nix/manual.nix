@@ -20,5 +20,9 @@ stdenv.mkDerivation rec {
   installPhase = ''
     mkdir -p $out/share/doc
     cp src/doc/snabbswitch.* $out/share/doc
+    # Give manual to Hydra
+    mkdir -p $out/nix-support
+    echo "doc-pdf manual $out/share/doc/snabbswitch.pdf" \
+      >> $out/nix-support/hydra-build-products;
   '';
 }
