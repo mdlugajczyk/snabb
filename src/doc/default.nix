@@ -4,7 +4,7 @@ stdenv.mkDerivation rec {
   name = "snabb-manual";
   src = ./../../.;
 
-  buildInputs = [ ditaa pandoc git
+  buildInputs = [ ditaa pandoc git bash
    (texlive.combine {
       inherit (texlive) scheme-small luatex luatexbase sectsty titlesec cprotect bigfoot titling droid;
     })
