@@ -20,6 +20,9 @@ ConnectX4.__index = ConnectX4
 
 --init segment
 
+local init_seg = {}
+init_seg.__index = init_seg
+
 function init_seg:init(addr)
    return setmetatable({addr = ffi.cast('uint32_t*', addr)}, self)
 end
