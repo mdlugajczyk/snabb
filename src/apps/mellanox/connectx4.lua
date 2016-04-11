@@ -32,13 +32,13 @@ local function split32(x)
 end
 
 function init_seg:fw_rev()
-   local maj, min = split32(bswap(addr[0]))
-   local sub = split32(bswap(addr[1]))
+   local maj, min = split32(bswap(self.addr[0]))
+   local sub = split32(bswap(self.addr[1]))
    return maj, min, sub
 end
 
 function init_seg:cmd_interface_rev()
-   local _, rev = split32(bswap(addr[1]))
+   local _, rev = split32(bswap(self.addr[1]))
    return rev
 end
 
