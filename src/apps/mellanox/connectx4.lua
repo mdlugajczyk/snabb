@@ -1,4 +1,4 @@
-
+--go@ git up
 --- Device driver for the Mellanox ConnectX-4 series Ethernet controller.
 
 module(...,package.seeall)
@@ -13,14 +13,31 @@ local macaddress = require("lib.macaddress")
 local mib = require("lib.ipc.shmem.mib")
 local timer = require("core.timer")
 local bits, bitset = lib.bits, lib.bitset
-local band, bor, shl, shr = bit.band, bit.bor, bit.lshift, bit.rshift
+local band, bor, shl, shr, bswap = bit.band, bit.bor, bit.lshift, bit.rshift, bit.bswap
 
 ConnectX4 = {}
 ConnectX4.__index = ConnectX4
 
-local init_segment_desc = [[
-fw_rev 0x0000 - RO Firmware Revision
-]]
+--init segment
+
+function init_seg:init(addr)
+   return setmetatable({addr = ffi.cast('uint32_t*', addr)}, self)
+end
+
+local function split32(x)
+   return shr(x, 16), band(x, 0xffff) --hi, lo
+end
+
+function init_seg:fw_rev()
+   local maj, min = split32(bswap(addr[0]))
+   local sub = split32(bswap(addr[1]))
+   return maj, min, sub
+end
+
+function init_seg:cmd_interface_rev()
+   local _, rev = split32(bswap(addr[1]))
+   return rev
+end
 
 function ConnectX4:new(arg)
    local self = setmetatable({}, self)
@@ -30,12 +47,11 @@ function ConnectX4:new(arg)
    pci.unbind_device_from_linux(pciaddress)
    pci.set_bus_master(pciaddress, true)
    local base, fd = pci.map_pci_memory(pciaddress, 0)
-   local r = {} --config registers
 
-   register.define(init_segment_desc, r, base)
+   local init_seg = init_seg:init(base)
 
-   local rev = r.fw_rev()
-   print(band(rev, 0xffff), shr(rev, 16))
+   print(init_seg:fw_rev())
+   print(init_seg:cmd_interface_rev())
 
    function self:stop()
       if not base then return end
@@ -43,18 +59,6 @@ function ConnectX4:new(arg)
       pci.close_pci_resource(fd, base)
       base, fd = nil
    end
-
-   --[[
-   register.define(config_registers_desc, self.r, self.base)
-   register.define(transmit_registers_desc, self.r, self.base)
-   register.define(receive_registers_desc, self.r, self.base)
-   register.define_array(packet_filter_desc, self.r, self.base)
-   register.define(statistics_registers_desc, self.s, self.base)
-   register.define_array(queue_statistics_registers_desc, self.qs, self.base)
-   self.txpackets = ffi.new("struct packet *[?]", num_descriptors)
-   self.rxpackets = ffi.new("struct packet *[?]", num_descriptors)
-   return self:init()
-   ]]
 
    return self
 end
