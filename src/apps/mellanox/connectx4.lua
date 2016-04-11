@@ -32,18 +32,17 @@ local function split32(x)
 end
 
 function init_seg:fw_rev()
-   local maj, min = split32(self.addr[0])
-   local sub = split32(self.addr[1])
+   local min, maj = split32(bswap(self.addr[0]))
+   local _, sub = split32(bswap(self.addr[1]))
    return maj, min, sub
 end
 
 function init_seg:cmd_interface_rev()
-   local _, rev = split32(self.addr[1])
-   return rev
+   return (split32(bswap(self.addr[1])))
 end
 
 function init_seg:cmdq_phy_addr()
-   return self.addr[4]
+   return bswap(self.addr[4])
 end
 
 function ConnectX4:new(arg)
