@@ -22,30 +22,15 @@ ConnectX4.__index = ConnectX4
 
 --utils
 
-local function getbits(ptr, ofs, bit2, bit1)
-	local ofs = ofs/4
-	assert(ofs == math.floor(ofs))
+local function getbits(val, bit2, bit1)
 	local mask = shl(2^(bit2-bit1+1)-1, bit1)
-	return shr(band(bswap(ptr[ofs]), mask), bit1)
+	return shr(band(val, mask), bit1)
 end
 
-local function setbits(ptr, ofs, bit2, bit1, val)
-	local ofs = ofs/4
-	assert(ofs == math.floor(ofs))
+local function setbits(bit2, bit1, val)
 	local mask = shl(2^(bit2-bit1+1)-1, bit1)
 	local bits = band(shl(val, bit1), mask)
-	ptr[ofs] = bswap(bits)
-end
-
---setbits with protecting the surrounding bits
-local function setbits2(ptr, ofs, bit2, bit1, val)
-	local ofs = ofs/4
-	assert(ofs == math.floor(ofs))
-	local poz_mask = shl(2^(bit2-bit1+1)-1, bit1)
-	local neg_mask = bnot(poz_mask)
-	local other_bits = band(bswap(ptr[ofs]), neg_mask)
-	local our_bits   = band(shl(val, bit1), poz_mask)
-	ptr[ofs] = bswap(bor(other_bits, our_bits))
+	return bswap(bits)
 end
 
 --init segment (section 4.3)
@@ -53,12 +38,24 @@ end
 local init_seg = {}
 init_seg.__index = init_seg
 
+function init_seg:get(ofs)
+	local ofs = ofs/4
+	assert(ofs == math.floor(ofs))
+	return bswap(self.addr[ofs])
+end
+
+function init_seg:set(ofs, val)
+	local ofs = ofs/4
+	assert(ofs == math.floor(ofs))
+	self.addr[ofs] = bswap(val)
+end
+
 function init_seg:getbits(ofs, bit2, bit1)
-	return getbits(self.addr, ofs, bit2, bit1)
+	return getbits(self:get(ofs), bit2, bit1)
 end
 
 function init_seg:setbits(ofs, bit2, bit1, val)
-	setbits(self.addr, ofs, bit2, bit1, val)
+	self:set(ofs, setbits(bit2, bit1, val))
 end
 
 function init_seg:init(addr)
@@ -81,12 +78,12 @@ function init_seg:cmdq_phy_addr(addr)
 		addr = cast('uint64_t', addr)
 		local hi = tonumber(shr(addr, 32))
 		local lo = tonumber(band(shr(addr, 12), 0xfffff))
-		self:setbits(0x10, 31,  0, hi) --must write the MSB first
+		self:set(0x10, hi) --must write the MSB of the addr first
 		self:setbits(0x14, 31, 12, lo)
 	else
-		return ffi.cast('void*',
-			ffi.cast('uint64_t', self:getbits(0x10, 31, 0)) * 2^32 +
-			ffi.cast('uint64_t', self:getbits(0x14, 31, 12)) * 2^12)
+		return cast('void*',
+			cast('uint64_t', self:get(0x10) * 2^32 +
+			cast('uint64_t', self:getbits(0x14, 31, 12)) * 2^12))
 	end
 end
 
@@ -154,8 +151,6 @@ function ConnectX4:new(arg)
 	--alloc the cmd queue
 	local cmdq = ffi.new('uint32_t[?]', 2 * 4096) --need 4K of 4K-aligned mem
 	init_seg:cmdq_phy_addr(cmdq)
-
-	init_seg:nic_interface(0)
 	while not init_seg:ready() do
       C.usleep(1000)
 	end
