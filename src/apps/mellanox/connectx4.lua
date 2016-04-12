@@ -14,15 +14,43 @@ local mib = require("lib.ipc.shmem.mib")
 local timer = require("core.timer")
 local bits, bitset = lib.bits, lib.bitset
 local cast = ffi.cast
-local band, bor, shl, shr, bswap = bit.band, bit.bor, bit.lshift, bit.rshift, bit.bswap
+local band, bor, shl, shr, bswap, bnot =
+	bit.band, bit.bor, bit.lshift, bit.rshift, bit.bswap, bit.bnot
 
 ConnectX4 = {}
 ConnectX4.__index = ConnectX4
+
+--utils
+
+local function getbits(ptr, ofs, bit2, bit1)
+	local ofs = ofs/4
+	assert(ofs == math.floor(ofs))
+	local mask = shl(2^(bit2-bit1+1)-1, bit1)
+	return shr(band(bswap(ptr[ofs]), mask), bit1)
+end
+
+local function setbits(ptr, ofs, bit2, bit1, val)
+	local ofs = ofs/4
+	assert(ofs == math.floor(ofs))
+	local poz_mask = shl(2^(bit2-bit1+1)-1, bit1)
+	local neg_mask = bnot(poz_mask)
+	local other_bits = band(bswap(ptr[ofs]), neg_mask)
+	local our_bits   = band(shl(val, bit1), poz_mask)
+	ptr[ofs] = bswap(bor(other_bits, our_bits))
+end
 
 --init segment
 
 local init_seg = {}
 init_seg.__index = init_seg
+
+function init_seg:getbits(ofs, bit2, bit1)
+	return getbits(self.addr, ofs, bit2, bit1)
+end
+
+function init_seg:setbits(ofs, bit2, bit1, val)
+	setbits(self.addr, ofs, bit2, bit1, val)
+end
 
 function init_seg:init(addr)
    return setmetatable({addr = cast('uint32_t*', addr)}, self)
@@ -33,9 +61,13 @@ local function split32(x)
 end
 
 function init_seg:fw_rev()
-   local min, maj = split32(bswap(self.addr[0]))
+	local min, maj = split32(bswap(self.addr[0]))
    local _, sub = split32(bswap(self.addr[1]))
-   return maj, min, sub
+   --return maj, min, sub
+	return
+		self:getbits(0, 15, 0),
+		self:getbits(0, 31, 16),
+		self:getbits(4, 15, 0)
 end
 
 function init_seg:cmd_interface_rev()
@@ -56,6 +88,11 @@ function init_seg:cmdq_phy_addr(addr)
 	end
 end
 
+function init_seg:nic_interface_mode(mode)
+	if mode then
+		self.addr[5] = bswap( bswap(self.addr[5]))
+end
+
 function ConnectX4:new(arg)
    local self = setmetatable({}, self)
    local conf = config.parse_app_arg(arg)
@@ -67,8 +104,8 @@ function ConnectX4:new(arg)
 
    local init_seg = init_seg:init(base)
 
-   print(init_seg:fw_rev())
-   print(init_seg:cmd_interface_rev())
+   print('fw_rev            ', init_seg:fw_rev())
+   print('cmd_interface_rev ', init_seg:cmd_interface_rev())
 	print(init_seg:cmdq_phy_addr())
 
    function self:stop()
