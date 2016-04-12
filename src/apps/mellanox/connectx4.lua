@@ -32,6 +32,15 @@ end
 local function setbits(ptr, ofs, bit2, bit1, val)
 	local ofs = ofs/4
 	assert(ofs == math.floor(ofs))
+	local mask = shl(2^(bit2-bit1+1)-1, bit1)
+	local bits = band(shl(val, bit1), mask)
+	ptr[ofs] = bswap(bits)
+end
+
+--setbits with protecting the surrounding bits
+local function setbits2(ptr, ofs, bit2, bit1, val)
+	local ofs = ofs/4
+	assert(ofs == math.floor(ofs))
 	local poz_mask = shl(2^(bit2-bit1+1)-1, bit1)
 	local neg_mask = bnot(poz_mask)
 	local other_bits = band(bswap(ptr[ofs]), neg_mask)
@@ -39,7 +48,7 @@ local function setbits(ptr, ofs, bit2, bit1, val)
 	ptr[ofs] = bswap(bor(other_bits, our_bits))
 end
 
---init segment
+--init segment (section 4.3)
 
 local init_seg = {}
 init_seg.__index = init_seg
@@ -56,14 +65,7 @@ function init_seg:init(addr)
    return setmetatable({addr = cast('uint32_t*', addr)}, self)
 end
 
-local function split32(x)
-   return shr(x, 16), band(x, 0xffff) --hi, lo
-end
-
-function init_seg:fw_rev()
-	local min, maj = split32(bswap(self.addr[0]))
-   local _, sub = split32(bswap(self.addr[1]))
-   --return maj, min, sub
+function init_seg:fw_rev() --maj, min, subminor
 	return
 		self:getbits(0, 15, 0),
 		self:getbits(0, 31, 16),
@@ -71,26 +73,63 @@ function init_seg:fw_rev()
 end
 
 function init_seg:cmd_interface_rev()
-   return (split32(bswap(self.addr[1])))
+   return self:getbits(4, 31, 16)
 end
 
 function init_seg:cmdq_phy_addr(addr)
 	if addr then
 		addr = cast('uint64_t', addr)
-		self.addr[4] = bswap(cast('uint32_t', shr(addr, 32)))
-		self.addr[5] = bswap(bor(
-				band(cast('uint32_t', addr), 0xfffff000),
-				band(bswap(self.addr[5]),    0x00000fff)))
+		local hi = tonumber(shr(addr, 32))
+		local lo = tonumber(band(shr(addr, 12), 0xfffff))
+		self:setbits(0x10, 31,  0, hi)
+		self:setbits(0x14, 31, 12, lo)
 	else
 		return ffi.cast('void*',
-			ffi.cast('uint64_t', bswap(self.addr[4])) * 2^32 +
-				ffi.cast('uint64_t', band(bswap(self.addr[5]), 0xfffff000)))
+			ffi.cast('uint64_t', self:getbits(0x10, 31, 0)) * 2^32 +
+			ffi.cast('uint64_t', self:getbits(0x14, 31, 12)) * 2^12)
 	end
 end
 
-function init_seg:nic_interface_mode(mode)
+function init_seg:nic_interface(mode)
 	if mode then
-		self.addr[5] = bswap( bswap(self.addr[5]))
+		self:setbits(0x14, 9, 8, mode and 1 or 0)
+	else
+		return self:getbits(0x14, 9, 8) ~= 0
+	end
+end
+
+function init_seg:log_cmdq_size()
+	return self:getbits(0x14, 7, 4)
+end
+
+function init_seg:log_cmdq_stride()
+	return self:getbits(0x14, 3, 0)
+end
+
+function init_seg:ring_doorbell(i)
+	self:setbits(0x18, 31-i, 31-i, 1)
+end
+
+function init_seg:ready(i, val)
+	return self:getbits(0x1fc, 31, 31) == 0
+end
+
+function init_seg:nic_interface_supported()
+	return self:getbits(0x1fc, 26, 24) == 0
+end
+
+function init_seg:internal_timer()
+	return
+		self:getbits(0x1000, 31, 0) * 2^32 +
+		self:getbits(0x1004, 31, 0)
+end
+
+function init_seg:clear_int()
+	self:setbits(0x100c, 0, 0, 1)
+end
+
+function init_seg:health_syndrome()
+	return self:getbits(0x1010, 31, 24)
 end
 
 function ConnectX4:new(arg)
@@ -104,9 +143,16 @@ function ConnectX4:new(arg)
 
    local init_seg = init_seg:init(base)
 
-   print('fw_rev            ', init_seg:fw_rev())
-   print('cmd_interface_rev ', init_seg:cmd_interface_rev())
-	print(init_seg:cmdq_phy_addr())
+   print('fw_rev                  ', init_seg:fw_rev())
+   print('cmd_interface_rev       ', init_seg:cmd_interface_rev())
+	print('cmdq_phy_addr           ', init_seg:cmdq_phy_addr())
+	print('nic_interface           ', init_seg:nic_interface())
+	print('log_cmdq_size           ', init_seg:log_cmdq_size())
+	print('log_cmdq_stride         ', init_seg:log_cmdq_stride())
+	print('ready                   ', init_seg:ready())
+	print('nic_interface_supported ', init_seg:nic_interface_supported())
+	print('internal_timer          ', init_seg:internal_timer())
+	print('health_syndrome         ', init_seg:health_syndrome())
 
    function self:stop()
       if not base then return end
