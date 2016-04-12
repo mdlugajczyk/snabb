@@ -151,12 +151,6 @@ function ConnectX4:new(arg)
 
    local init_seg = init_seg:init(base)
 
-	init_seg:nic_interface(1)
-	while init_seg:ready() do
-      C.usleep(1000)
-	end
-	print'disabled!'
-
 	local cmdq = ffi.new('uint32_t[?]', 100)
 	init_seg:cmdq_phy_addr(cmdq)
 	init_seg:log_cmdq_size(0)
@@ -166,6 +160,7 @@ function ConnectX4:new(arg)
       C.usleep(1000)
 	end
 	print'ready wohoo!'
+	self:dump()
 
    function self:stop()
       if not base then return end
