@@ -43,11 +43,31 @@ local ffi = require("ffi")
 -- avoid distraction this definition only covers the details we are
 -- using. See PRM for full details.
 
-local wqe = ffi.typeof[[
+local wqe_t = ffi.typeof[[
   struct {
     uint32_t length;   // 30-bit length
     uint32_t lkey;     // always set to "reserved lkey" value
     uint64_t address;  // physical address (because reserved lkey)
+  }
+]]
+
+-- Doorbell Record - Cursor in work queues
+--
+-- The doorbell record is written by Snabb to tell the NIC where the
+-- last valid read and write descriptors are. This is a cursor in a
+-- ring buffer like the 'read' and 'write' fields of 'struct packet'.
+--
+-- Snabb "rings the doorbell" after it writes descriptors by updating
+-- these values to point to where the next new descriptor will be
+-- written (which implies that all the previous descriptors have
+-- already been written and should be processed.)
+
+local doorbell_t = ffi.typeof[[
+  struct {
+    uint16_t read;
+    uint16_t pad;
+    uint16_t write;
+    uint16_t pad;
   }
 ]]
 
