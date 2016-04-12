@@ -160,7 +160,7 @@ function ConnectX4:new(arg)
       C.usleep(1000)
 	end
 	print'ready wohoo!'
-	self:dump()
+	init_seg:dump()
 
    function self:stop()
       if not base then return end
