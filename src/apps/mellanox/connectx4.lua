@@ -81,7 +81,7 @@ function init_seg:cmdq_phy_addr(addr)
 		addr = cast('uint64_t', addr)
 		local hi = tonumber(shr(addr, 32))
 		local lo = tonumber(band(shr(addr, 12), 0xfffff))
-		self:setbits(0x10, 31,  0, hi)
+		self:setbits(0x10, 31,  0, hi) --must write the MSB first
 		self:setbits(0x14, 31, 12, lo)
 	else
 		return ffi.cast('void*',
@@ -91,11 +91,7 @@ function init_seg:cmdq_phy_addr(addr)
 end
 
 function init_seg:nic_interface(mode)
-	if mode then
-		self:setbits(0x14, 9, 8, mode and 1 or 0)
-	else
-		return self:getbits(0x14, 9, 8) ~= 0
-	end
+	self:setbits(0x14, 9, 8, mode)
 end
 
 function init_seg:log_cmdq_size()
@@ -146,13 +142,22 @@ function ConnectX4:new(arg)
    print('fw_rev                  ', init_seg:fw_rev())
    print('cmd_interface_rev       ', init_seg:cmd_interface_rev())
 	print('cmdq_phy_addr           ', init_seg:cmdq_phy_addr())
-	print('nic_interface           ', init_seg:nic_interface())
 	print('log_cmdq_size           ', init_seg:log_cmdq_size())
 	print('log_cmdq_stride         ', init_seg:log_cmdq_stride())
 	print('ready                   ', init_seg:ready())
 	print('nic_interface_supported ', init_seg:nic_interface_supported())
 	print('internal_timer          ', init_seg:internal_timer())
 	print('health_syndrome         ', init_seg:health_syndrome())
+
+	local cmdq = ffi.new('uint32_t[?]', 100)
+	init_seg:cmdq_phy_addr(cmdq)
+	init_seg:log_cmdq_size(0)
+	init_seg:log_cmdq_stride(0)
+	init_seg:nic_interface(0)
+	while not init_seg:ready() do
+      C.usleep(1000)
+	end
+	print'ready wohoo!'
 
    function self:stop()
       if not base then return end
