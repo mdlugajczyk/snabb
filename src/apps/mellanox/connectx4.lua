@@ -151,15 +151,16 @@ function ConnectX4:new(arg)
 
    local init_seg = init_seg:init(base)
 
-	local cmdq = ffi.new('uint32_t[?]', 100)
+	--alloc the cmd queue
+	local cmdq = ffi.new('uint32_t[?]', 2 * 4096) --need 4K of 4K-aligned mem
 	init_seg:cmdq_phy_addr(cmdq)
-	init_seg:log_cmdq_size(0)
-	init_seg:log_cmdq_stride(0)
+
 	init_seg:nic_interface(0)
 	while not init_seg:ready() do
       C.usleep(1000)
 	end
 	print'ready wohoo!'
+	print('cmdq', cmdq)
 	init_seg:dump()
 
    function self:stop()
