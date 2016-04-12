@@ -128,6 +128,18 @@ function init_seg:health_syndrome()
 	return self:getbits(0x1010, 31, 24)
 end
 
+function init_seg:dump()
+   print('fw_rev                  ', self:fw_rev())
+   print('cmd_interface_rev       ', self:cmd_interface_rev())
+	print('cmdq_phy_addr           ', self:cmdq_phy_addr())
+	print('log_cmdq_size           ', self:log_cmdq_size())
+	print('log_cmdq_stride         ', self:log_cmdq_stride())
+	print('ready                   ', self:ready())
+	print('nic_interface_supported ', self:nic_interface_supported())
+	print('internal_timer          ', self:internal_timer())
+	print('health_syndrome         ', self:health_syndrome())
+end
+
 function ConnectX4:new(arg)
    local self = setmetatable({}, self)
    local conf = config.parse_app_arg(arg)
@@ -139,15 +151,11 @@ function ConnectX4:new(arg)
 
    local init_seg = init_seg:init(base)
 
-   print('fw_rev                  ', init_seg:fw_rev())
-   print('cmd_interface_rev       ', init_seg:cmd_interface_rev())
-	print('cmdq_phy_addr           ', init_seg:cmdq_phy_addr())
-	print('log_cmdq_size           ', init_seg:log_cmdq_size())
-	print('log_cmdq_stride         ', init_seg:log_cmdq_stride())
-	print('ready                   ', init_seg:ready())
-	print('nic_interface_supported ', init_seg:nic_interface_supported())
-	print('internal_timer          ', init_seg:internal_timer())
-	print('health_syndrome         ', init_seg:health_syndrome())
+	init_seg:nic_interface(1)
+	while init_seg:ready() do
+      C.usleep(1000)
+	end
+	print'disabled!'
 
 	local cmdq = ffi.new('uint32_t[?]', 100)
 	init_seg:cmdq_phy_addr(cmdq)
