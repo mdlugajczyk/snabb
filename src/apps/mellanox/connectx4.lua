@@ -78,8 +78,9 @@ function init_seg:cmdq_phy_addr(addr)
 		addr = cast('uint64_t', addr)
 		local hi = tonumber(shr(addr, 32))
 		local lo = tonumber(band(shr(addr, 12), 0xfffff))
+		print(string.format('%x %x', hi, lo))
 		self:set(0x10, hi) --must write the MSB of the addr first
-		self:setbits(0x14, 31, 12, lo)
+		self:setbits(0x14, 31, 12, lo) --also resets nic_interface and log_cmdq_*
 	else
 		return cast('void*',
 			cast('uint64_t', self:get(0x10) * 2^32 +
@@ -148,7 +149,7 @@ function ConnectX4:new(arg)
 
    local init_seg = init_seg:init(base)
 
-	--alloc the cmd queue
+	--alloc the cmd queue and set it
 	local cmdq = ffi.new('uint32_t[?]', 2 * 4096) --need 4K of 4K-aligned mem
 	init_seg:cmdq_phy_addr(cmdq)
 	while not init_seg:ready() do
