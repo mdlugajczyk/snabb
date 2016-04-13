@@ -30,7 +30,7 @@ end
 local function setbits(bit2, bit1, val)
 	local mask = shl(2^(bit2-bit1+1)-1, bit1)
 	local bits = band(shl(val, bit1), mask)
-	return bswap(bits)
+	return bits
 end
 
 --init segment (section 4.3)
