@@ -155,7 +155,7 @@ function ConnectX4:new(arg)
       C.usleep(1000)
 	end
 	print'ready wohoo!'
-	print('cmdq', cmdq_phy)
+	print('cmdq', string.format('%x', cmdq_phy))
 	init_seg:dump()
 
    function self:stop()
