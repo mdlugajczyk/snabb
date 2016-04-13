@@ -81,6 +81,7 @@ function init_seg:cmdq_phy_addr(addr)
 		print(string.format('%x %x', hi, lo))
 		self:set(0x10, hi) --must write the MSB of the addr first
 		self:setbits(0x14, 31, 12, lo) --also resets nic_interface and log_cmdq_*
+		print('getbits', self:getbits(0x14, 31, 12))
 	else
 		return cast('void*',
 			cast('uint64_t', self:get(0x10) * 2^32 +
@@ -154,8 +155,7 @@ function ConnectX4:new(arg)
 	while not init_seg:ready() do
       C.usleep(1000)
 	end
-	print'ready wohoo!'
-	print('cmdq', bit.tohex(cmdq_phy))
+	print('ready wohoo!', bit.tohex(cmdq_phy))
 	init_seg:dump()
 
    function self:stop()
