@@ -183,11 +183,11 @@ function cmd_queue:post(in_sz, out_sz)
 	self:setbits(0x04, 31, 0, in_sz) --input_length
 	self:setbits(0x38, 31, 0, out_sz) --output_length
 
-	self:setbits(0x08, 31, 0, addrbits(imptr, 63, 32))
-	self:setbits(0x0C, 31, 9, addrbits(imptr, 31, 9))
+	self:setbits(0x08, 31, 0, ptrbits(imptr, 63, 32))
+	self:setbits(0x0C, 31, 9, ptrbits(imptr, 31, 9))
 
-	self:setbits(0x30, 31, 0, addrbits(omptr, 63, 32))
-	self:setbits(0x34, 31, 9, addrbits(omptr, 31, 9))
+	self:setbits(0x30, 31, 0, ptrbits(omptr, 63, 32))
+	self:setbits(0x34, 31, 9, ptrbits(omptr, 31, 9))
 
 	self:setbits(0x3C, 0, 0, 1) --set ownership
 
