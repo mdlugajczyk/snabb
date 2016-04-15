@@ -13,6 +13,7 @@ local macaddress = require("lib.macaddress")
 local mib = require("lib.ipc.shmem.mib")
 local timer = require("core.timer")
 local bits, bitset = lib.bits, lib.bitset
+local floor = math.floor
 local cast = ffi.cast
 local band, bor, shl, shr, bswap, bnot =
 	bit.band, bit.bor, bit.lshift, bit.rshift, bit.bswap, bit.bnot
@@ -22,9 +23,26 @@ ConnectX4.__index = ConnectX4
 
 --utils
 
+function getint(addr, ofs)
+	local ofs = ofs/4
+	assert(ofs == floor(ofs))
+	return bswap(addr[ofs])
+end
+
+function setint(addr, ofs, val)
+	local ofs = ofs/4
+	assert(ofs == floor(ofs))
+	addr[ofs] = bswap(val)
+end
+
 local function getbits(val, bit2, bit1)
 	local mask = shl(2^(bit2-bit1+1)-1, bit1)
 	return shr(band(val, mask), bit1)
+end
+
+local function ptrbits(ptr, bit2, bit1)
+	local addr = cast('uint64_t', ptr)
+	return tonumber(getbits(addr, bit2, bit1))
 end
 
 local function setbits(bit2, bit1, val)
@@ -38,24 +56,12 @@ end
 local init_seg = {}
 init_seg.__index = init_seg
 
-function init_seg:get(ofs)
-	local ofs = ofs/4
-	assert(ofs == math.floor(ofs))
-	return bswap(self.addr[ofs])
-end
-
-function init_seg:set(ofs, val)
-	local ofs = ofs/4
-	assert(ofs == math.floor(ofs))
-	self.addr[ofs] = bswap(val)
-end
-
 function init_seg:getbits(ofs, bit2, bit1)
-	return getbits(self:get(ofs), bit2, bit1)
+	return getbits(getint(self.addr, ofs), bit2, bit1)
 end
 
 function init_seg:setbits(ofs, bit2, bit1, val)
-	self:set(ofs, setbits(bit2, bit1, val))
+	setint(self.addr, ofs, setbits(bit2, bit1, val))
 end
 
 function init_seg:init(addr)
@@ -75,16 +81,13 @@ end
 
 function init_seg:cmdq_phy_addr(addr)
 	if addr then
-		addr = cast('uint64_t', addr)
-		local hi = tonumber(shr(addr, 32))
-		local lo = tonumber(band(shr(addr, 12), 0xfffff))
-		print(string.format('%x %x', hi, lo))
-		self:set(0x10, hi) --must write the MSB of the addr first
-		self:setbits(0x14, 31, 12, lo) --also resets nic_interface and log_cmdq_*
-		print('getbits', self:getbits(0x14, 31, 12))
+		--must write the MSB of the addr first
+		self:setbits(0x10, 31, 0, ptrbits(addr, 63, 32))
+		--also resets nic_interface and log_cmdq_*
+		self:setbits(0x14, 31, 12, ptrbits(addr, 31, 12))
 	else
 		return cast('void*',
-			cast('uint64_t', self:get(0x10) * 2^32 +
+			cast('uint64_t', self:getbits(0x10, 31, 0) * 2^32 +
 			cast('uint64_t', self:getbits(0x14, 31, 12)) * 2^12))
 	end
 end
@@ -127,6 +130,87 @@ function init_seg:health_syndrome()
 	return self:getbits(0x1010, 31, 24)
 end
 
+--command queue (section 7.14.1)
+
+local cmd_queue = {}
+cmd_queue.__index = cmd_queue
+
+--init cmds
+local QUERY_HCA_CAP      = 0x100
+local QUERY_ADAPTER      = 0x101
+local INIT_HCA           = 0x102
+local TEARDOWN_HCA       = 0x103
+local ENABLE_HCA         = 0x104
+local DISABLE_HCA        = 0x105
+local QUERY_PAGES        = 0x107
+local MANAGE_PAGES       = 0x108
+local SET_HCA_CAP        = 0x109
+local QUERY_ISSI         = 0x10A
+local SET_ISSI           = 0x10B
+local SET_DRIVER_VERSION = 0x10D
+
+function cmd_queue:new(addr, init_seg)
+	return setmetatable({
+		addr = ffi.cast('uint32_t*', addr),
+		init_seg = init_seg,
+		size = init_seg:log_cmdq_size(),
+		stride = init_seg:log_cmdq_stride(),
+	}, self)
+end
+
+function cmd_queue:getbits(ofs, bit2, bit1)
+	return getbits(getint(self.addr, ofs), bit2, bit1)
+end
+
+function cmd_queue:setbits(ofs, bit2, bit1, val)
+	setint(self.addr, ofs, setbits(bit2, bit1, val))
+end
+
+function cmd_queue:setinbits(ofs, bit2, bit1, val)
+	self:setbits(0x10 + ofs, bit2, bit1, val)
+end
+
+function cmd_queue:getoutbits(ofs, bit2, bit1)
+	return self:getbits(0x20 + ofs, bit2, bit1)
+end
+
+function cmd_queue:post(in_sz)
+	local imptr = 0
+	local omptr = 0
+
+	self:setbits(0x00, 31, 24, 0x7) --type
+
+	self:setbits(0x04, 31, 0, in_sz) --input_length
+	self:setbits(0x38, 31, 0, out_sz) --output_length
+
+	self:setbits(0x08, 31, 0, addrbits(imptr, 63, 32))
+	self:setbits(0x0C, 31, 9, addrbits(imptr, 31, 9))
+
+	self:setbits(0x30, 31, 0, addrbits(omptr, 63, 32))
+	self:setbits(0x34, 31, 9, addrbits(omptr, 31, 9))
+
+	self:setbits(0x3C, 0, 0, 1) --set ownership
+
+	self.init_seg:ring_doorbell(0) --post command
+
+	--poll for command completion
+	while self:getbits(0x3C, 0, 0) == 1 do
+		C.usleep(1000)
+	end
+
+	local token     = self:getbits(0x3C, 31, 24)
+	local signature = self:getbits(0x3C, 23, 16)
+	local status    = self:getbits(0x3C,  7,  1)
+
+	return status, signature, token
+end
+
+function cmd_queue:enable_hca()
+	self:setinbits(0x00, 31, 16, ENABLE_HCA)
+	local status = self:post(0x0C + 4)
+	print(status)
+end
+
 function init_seg:dump()
    print('fw_rev                  ', self:fw_rev())
    print('cmd_interface_rev       ', self:cmd_interface_rev())
@@ -150,12 +234,16 @@ function ConnectX4:new(arg)
 
    local init_seg = init_seg:init(base)
 
+	--allocate and set the command queue which also initializes the nic
 	local cmdq_ptr, cmdq_phy = memory.dma_alloc(4096)
+	assert(band(cmdq_phy, 0xfff) == 0) --the phy address must be 4K-aligned
 	init_seg:cmdq_phy_addr(cmdq_phy)
+
+	--wait until the nic is ready
 	while not init_seg:ready() do
       C.usleep(1000)
 	end
-	print('ready wohoo!', bit.tohex(cmdq_phy))
+
 	init_seg:dump()
 
    function self:stop()
