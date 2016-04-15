@@ -246,6 +246,9 @@ function ConnectX4:new(arg)
 
 	init_seg:dump()
 
+	local cmdq = cmd_queue:new(cmdq_ptr, init_seg)
+	cmdq:enable_hca()
+
    function self:stop()
       if not base then return end
       pci.set_bus_master(pciaddress, false)
