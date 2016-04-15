@@ -105,7 +105,7 @@ function init_seg:log_cmdq_stride()
 end
 
 function init_seg:ring_doorbell(i)
-	self:setbits(0x18, 31-i, 31-i, 1)
+	self:setbits(0x18, i, i, 1)
 end
 
 function init_seg:ready(i, val)
