@@ -174,7 +174,7 @@ function cmd_queue:getoutbits(ofs, bit2, bit1)
 	return self:getbits(0x20 + ofs, bit2, bit1)
 end
 
-function cmd_queue:post(in_sz)
+function cmd_queue:post(in_sz, out_sz)
 	local imptr = 0
 	local omptr = 0
 
@@ -207,7 +207,7 @@ end
 
 function cmd_queue:enable_hca()
 	self:setinbits(0x00, 31, 16, ENABLE_HCA)
-	local status = self:post(0x0C + 4)
+	local status = self:post(0x0C + 4, 0x08 + 4)
 	print(status)
 end
 
