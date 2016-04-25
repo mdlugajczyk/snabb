@@ -320,8 +320,8 @@ function cmdq:alloc_pages(addr, num_pages)
    self:setinbits(0x0C, 31, 0, num_pages)
    local addr = cast('char*', addr)
    for i=0, num_pages-1 do
-      self:setbits(0x10 + i*8, 31,  0, ptrbits(addr + 4096*i, 63, 32))
-      self:setbits(0x14 + i*8, 31, 12, ptrbits(addr + 4096*i, 31, 12))
+      self:setinbits(0x10 + i*8, 31,  0, ptrbits(addr + 4096*i, 63, 32))
+      self:setinbits(0x14 + i*8, 31, 12, ptrbits(addr + 4096*i, 31, 12))
    end
    self:post(0x10 + 4 + num_pages*8, 0x0C + 4)
    self:checkstatus()
