@@ -26,7 +26,7 @@ ConnectX4.__index = ConnectX4
 local function alloc_pages(pages)
    local ptr, phy = memory.dma_alloc(4096 * pages)
    assert(band(phy, 0xfff) == 0) --the phy address must be 4K-aligned
-   return ptr, phy
+   return cast('uint32_t*', ptr), phy
 end
 
 function getint(addr, ofs)
@@ -76,8 +76,8 @@ function init_seg:setbits(ofs, bit2, bit1, val)
    setint(self.ptr, ofs, setbits(bit2, bit1, val))
 end
 
-function init_seg:init(addr)
-   return setmetatable({ptr = cast('uint32_t*', addr)}, self)
+function init_seg:init(ptr)
+   return setmetatable({ptr = ptr}, self)
 end
 
 function init_seg:fw_rev() --maj, min, subminor
@@ -166,10 +166,10 @@ function cmdq:new(init_seg)
    local ib_ptr, ib_phy = alloc_pages(1)
    local ob_ptr, ob_phy = alloc_pages(1)
    return setmetatable({
-      ptr = cast('uint32_t*', ptr),
+      ptr = ptr,
       phy = phy,
-      ib_ptr = cast('uint32_t*', ib_ptr),
-      ob_ptr = cast('uint32_t*', ob_ptr),
+      ib_ptr = ib_ptr,
+      ob_ptr = ob_ptr,
       init_seg = init_seg,
       size = init_seg:log_cmdq_size(),
       stride = init_seg:log_cmdq_stride(),
