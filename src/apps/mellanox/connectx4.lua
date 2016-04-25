@@ -189,7 +189,8 @@ function cmdq:setinbits(ofs, bit2, bit1, val)
    if ofs <= 16 - 4 then --inline
       self:setbits(0x10 + ofs, bit2, bit1, val)
    else --input mailbox
-      assert(ofs <= 4096 - 4)
+      assert(ofs <= 16 - 4 + 4096)
+      print('ib_ptr', ofs)
       setint(self.ib_ptr, ofs, setbits(bit2, bit1, val))
    end
 end
@@ -198,7 +199,7 @@ function cmdq:getoutbits(ofs, bit2, bit1)
    if ofs <= 16 - 4 then --inline
       return self:getbits(0x20 + ofs, bit2, bit1)
    else --output mailbox
-      assert(ofs <= 4096 - 4)
+      assert(ofs <= 16 - 4 + 4096)
       return getbits(getint(self.ob_ptr, ofs), bit2, bit1)
    end
 end
@@ -233,8 +234,8 @@ end
 function cmdq:post(in_sz, out_sz)
    self:setbits(0x00, 31, 24, 0x7) --type
 
-   self:setbits(0x04, 31, 0, 16) --input_length
-   self:setbits(0x38, 31, 0, 16) --output_length
+   self:setbits(0x04, 31, 0, in_sz) --input_length
+   self:setbits(0x38, 31, 0, out_sz) --output_length
 
    self:setbits(0x08, 31, 0, ptrbits(self.ib_addr, 63, 32))
    self:setbits(0x0C, 31, 9, ptrbits(self.ib_addr, 31, 9))
