@@ -184,7 +184,8 @@ function cmdq:setinbits(ofs, bit2, bit1, val)
    if ofs <= 12 then --inline
       self:setbits(0x10 + ofs, bit2, bit1, val)
    else --mailbox
-      self:setbits(
+      print(ofs)
+      --self:setbits(
    end
 end
 
