@@ -69,15 +69,15 @@ local init_seg = {}
 init_seg.__index = init_seg
 
 function init_seg:getbits(ofs, bit2, bit1)
-   return getbits(getint(self.addr, ofs), bit2, bit1)
+   return getbits(getint(self.ptr, ofs), bit2, bit1)
 end
 
 function init_seg:setbits(ofs, bit2, bit1, val)
-   setint(self.addr, ofs, setbits(bit2, bit1, val))
+   setint(self.ptr, ofs, setbits(bit2, bit1, val))
 end
 
 function init_seg:init(addr)
-   return setmetatable({addr = cast('uint32_t*', addr)}, self)
+   return setmetatable({ptr = cast('uint32_t*', addr)}, self)
 end
 
 function init_seg:fw_rev() --maj, min, subminor
@@ -161,11 +161,15 @@ local QUERY_ISSI         = 0x10A
 local SET_ISSI           = 0x10B
 local SET_DRIVER_VERSION = 0x10D
 
-function cmdq:new(addr, ib_addr, ob_addr, init_seg)
+function cmdq:new(init_seg)
+   local ptr, phy = alloc_pages(1)
+   local ib_ptr, ib_phy = alloc_pages(1)
+   local ob_ptr, ob_phy = alloc_pages(1)
    return setmetatable({
-      addr = ffi.cast('uint32_t*', addr),
-      ib_addr = ffi.cast('uint32_t*', ib_addr),
-      ob_addr = ffi.cast('uint32_t*', ob_addr),
+      ptr = ptr,
+      phy = phy,
+      ib_ptr = ib_ptr,
+      ob_ptr = ob_ptr,
       init_seg = init_seg,
       size = init_seg:log_cmdq_size(),
       stride = init_seg:log_cmdq_stride(),
@@ -173,11 +177,11 @@ function cmdq:new(addr, ib_addr, ob_addr, init_seg)
 end
 
 function cmdq:getbits(ofs, bit2, bit1)
-   return getbits(getint(self.addr, ofs), bit2, bit1)
+   return getbits(getint(self.ptr, ofs), bit2, bit1)
 end
 
 function cmdq:setbits(ofs, bit2, bit1, val)
-   setint(self.addr, ofs, setbits(bit2, bit1, val))
+   setint(self.ptr, ofs, setbits(bit2, bit1, val))
 end
 
 function cmdq:setinbits(ofs, bit2, bit1, val)
@@ -196,7 +200,7 @@ end
 function cmdq:getoutaddr(ofs)
    local ofs = (0x20 + ofs) / 4
    assert(ofs == math.floor(ofs))
-   return self.addr + ofs
+   return self.ptr + ofs
 end
 
 function cmdq:getbit(ofs, bit)
@@ -346,14 +350,11 @@ function ConnectX4:new(arg)
    local init_seg = init_seg:init(base)
 
    --allocate and set the command queue which also initializes the nic
-   local cmdq_ptr, cmdq_phy = alloc_pages(4096)
-   local ib_ptr, ib_phy = alloc_pages(4096)
-   local ob_ptr, ob_phy = alloc_pages(4096)
-   local cmdq = cmdq:new(cmdq_ptr, ib_ptr, ob_ptr, init_seg)
+   local cmdq = cmdq:new(init_seg)
 
    --8.2 HCA Driver Start-up
 
-   init_seg:cmdq_phy_addr(cmdq_phy)
+   init_seg:cmdq_phy_addr(cmdq.phy)
 
    --wait until the nic is ready
    while not init_seg:ready() do
