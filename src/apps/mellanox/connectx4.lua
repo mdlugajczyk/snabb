@@ -186,11 +186,11 @@ end
 
 function cmdq:setinbits(ofs, bit2, bit1, val)
    assert(band(ofs, 3) == 0) --offset must be 4-byte aligned
+   print(ofs)
    if ofs <= 16 - 4 then --inline
       self:setbits(0x10 + ofs, bit2, bit1, val)
    else --input mailbox
       assert(ofs <= 16 - 4 + 4096)
-      print('ib_ptr', ofs)
       setint(self.ib_ptr, ofs, setbits(bit2, bit1, val))
    end
 end
