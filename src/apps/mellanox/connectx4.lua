@@ -340,8 +340,7 @@ function ConnectX4:new(arg)
 	cmdq:enable_hca()
 	local issi = cmdq:query_issi()
 	cmdq:dump_issi(issi)
-	local t = cmdq:set_issi(0)
-	print('set_issi', t.status, t.syndrome)
+	cmdq:set_issi(0)
 	local boot_pages = cmdq:query_pages'boot'
 	print("query_pages'boot'", boot_pages)
 
