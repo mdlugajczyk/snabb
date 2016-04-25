@@ -249,13 +249,16 @@ function cmdq:query_issi()
 	local status   = self:getoutbits(0x00, 31, 24)
 	local syndrome = self:getoutbits(0x04, 31, 0)
 	local cur_ssi  = self:getoutbits(0x08, 15, 0)
-	print('status   ', status)
-	print('syndrome ', syndrome)
-	print('cur_ssi  ', cur_ssi)
-	print('sup_ssi  ')
+	local t = {}
 	for i=0,80-1 do
-		print(i, self:getbit(0x20, i))
+		t[i] = self:getbit(0x20, i) and true or false
 	end
+	return {
+		status = status,
+		syndrome = syndrome,
+		cur_ssi = cur_ssi,
+		sup_ssi = t,
+	}
 end
 
 function init_seg:dump()
@@ -268,6 +271,17 @@ function init_seg:dump()
 	print('nic_interface_supported ', self:nic_interface_supported())
 	print('internal_timer          ', self:internal_timer())
 	print('health_syndrome         ', self:health_syndrome())
+	print('query_issi')
+	local issi = self:query_issi()
+	print('  status                ', issi.status)
+	print('  syndrome              ', issi.syndrome)
+	print('  cur_ssi               ', issi.cur_ssi)
+	print('  sup_ssi               ')
+	for i=0,79 do
+	print(string.format(
+	      '     %02d               ', i), issi.sup_issi[i])
+	end
+
 end
 
 function ConnectX4:new(arg)
