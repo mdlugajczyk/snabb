@@ -185,6 +185,7 @@ function cmdq:setbits(ofs, bit2, bit1, val)
 end
 
 function cmdq:setinbits(ofs, bit2, bit1, val)
+   assert(band(ofs, 3) == 0) --offset must be 4-byte aligned
    if ofs <= 12 then --inline
       self:setbits(0x10 + ofs, bit2, bit1, val)
    else --mailbox
