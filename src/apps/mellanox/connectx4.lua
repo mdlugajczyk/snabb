@@ -268,7 +268,7 @@ function cmdq:dump_issi(issi)
 	print('  sup_ssi               ')
 	for i=0,79 do
 	print(string.format(
-	      '     %02d               ', i), issi.sup_issi[i])
+	      '     %02d               ', i), issi.sup_ssi[i])
 	end
 end
 
