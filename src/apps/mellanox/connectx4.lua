@@ -274,8 +274,6 @@ function cmdq:set_issi(issi)
 end
 
 function cmdq:dump_issi(issi)
-   print('  status                ', issi.status)
-   print('  syndrome              ', issi.syndrome)
    print('  cur_issi              ', issi.cur_issi)
    print('  sup_issi              ')
    for i=0,79 do
@@ -361,8 +359,7 @@ function ConnectX4:new(arg)
    print("query_pages'boot'       ", boot_pages)
 
    local bp_ptr, bp_phy = memory.dma_alloc(4096 * boot_pages)
-   print(bp_ptr, bp_phy)
-   cmdq:alloc_pages(bp_ptr, boot_pages)
+   cmdq:alloc_pages(bp_phy, boot_pages)
 
    --[[
    cmdq:query_hca_cap()
