@@ -238,6 +238,7 @@ local function checkz(z)
    error('command error: '..(errors[z] or z))
 end
 
+--see 12.2 Return Status Summary
 function cmdq:checkstatus()
    local status = self:getoutbits(0x00, 31, 24)
    local syndrome = self:getoutbits(0x04, 31, 0)
@@ -351,13 +352,16 @@ function ConnectX4:new(arg)
    init_seg:dump()
 
    cmdq:enable_hca()
+
    local issi = cmdq:query_issi()
    cmdq:dump_issi(issi)
    cmdq:set_issi(0)
+
    local boot_pages = cmdq:query_pages'boot'
-   print("query_pages'boot'", boot_pages)
+   print("query_pages'boot'       ", boot_pages)
 
    local bp_ptr, bp_phy = memory.dma_alloc(4096 * boot_pages)
+   print(bp_ptr, bp_phy)
    cmdq:alloc_pages(bp_ptr, boot_pages)
 
    --[[
