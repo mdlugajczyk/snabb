@@ -186,16 +186,21 @@ end
 
 function cmdq:setinbits(ofs, bit2, bit1, val)
    assert(band(ofs, 3) == 0) --offset must be 4-byte aligned
-   if ofs <= 12 then --inline
+   if ofs <= 16 - 4 then --inline
       self:setbits(0x10 + ofs, bit2, bit1, val)
-   else --mailbox
-      print(ofs)
-      --self:setbits(
+   else --input mailbox
+      assert(ofs <= 4096 - 4)
+      setint(self.ib_ptr, ofs, setbits(bit2, bit1, val))
    end
 end
 
 function cmdq:getoutbits(ofs, bit2, bit1)
-   return self:getbits(0x20 + ofs, bit2, bit1)
+   if ofs <= 16 - 4 then --inline
+      return self:getbits(0x20 + ofs, bit2, bit1)
+   else --output mailbox
+      assert(ofs <= 4096 - 4)
+      return getbits(getint(self.ob_ptr, ofs), bit2, bit1)
+   end
 end
 
 function cmdq:getoutaddr(ofs)
