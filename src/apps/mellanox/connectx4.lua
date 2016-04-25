@@ -251,7 +251,7 @@ function cmdq:query_issi()
 	local cur_ssi  = self:getoutbits(0x08, 15, 0)
 	local t = {}
 	for i=0,80-1 do
-		t[i] = self:getbit(0x20, i) and true or false
+		t[i] = self:getbit(0x20, i) == 1
 	end
 	return {
 		status = status,
