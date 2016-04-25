@@ -359,6 +359,7 @@ function ConnectX4:new(arg)
    print("query_pages'boot'       ", boot_pages)
 
    local bp_ptr, bp_phy = memory.dma_alloc(4096 * boot_pages)
+   assert(band(bp_phy, 0xfff) == 0) --the phy address must be 4K-aligned
    cmdq:alloc_pages(bp_phy, boot_pages)
 
    --[[
