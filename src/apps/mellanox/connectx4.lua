@@ -256,7 +256,7 @@ function cmdq:query_issi()
 	return {
 		status = status,
 		syndrome = syndrome,
-		cur_issi = cur_ssi,
+		cur_issi = cur_issi,
 		sup_issi = t,
 	}
 end
