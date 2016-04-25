@@ -273,6 +273,11 @@ function cmdq:enable_hca()
    self:post(0x0C + 4, 0x08 + 4)
 end
 
+function cmdq:disable_hca()
+   self:setinbits(0x00, 31, 16, DISABLE_HCA)
+   self:post(0x0C + 4, 0x08 + 4)
+end
+
 function cmdq:query_issi()
    self:setinbits(0x00, 31, 16, QUERY_ISSI)
    self:post(0x0C + 4, 0x6C + 4)
@@ -373,6 +378,8 @@ function ConnectX4:new(arg)
 
    local issi = cmdq:query_issi()
    cmdq:dump_issi(issi)
+
+   cmdq:disable_hca()
 
    --[[
    cmdq:set_issi(0)
