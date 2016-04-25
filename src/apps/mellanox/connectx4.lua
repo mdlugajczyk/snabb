@@ -233,8 +233,8 @@ end
 function cmdq:post(in_sz, out_sz)
    self:setbits(0x00, 31, 24, 0x7) --type
 
-   self:setbits(0x04, 31, 0, in_sz) --input_length
-   self:setbits(0x38, 31, 0, out_sz) --output_length
+   self:setbits(0x04, 31, 0, 16) --input_length
+   self:setbits(0x38, 31, 0, 16) --output_length
 
    self:setbits(0x08, 31, 0, ptrbits(self.ib_addr, 63, 32))
    self:setbits(0x0C, 31, 9, ptrbits(self.ib_addr, 31, 9))
