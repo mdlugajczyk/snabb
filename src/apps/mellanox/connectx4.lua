@@ -51,6 +51,12 @@ local function setbits(bit2, bit1, val)
 	return bits
 end
 
+local function getbit(addr, bit)
+	local i = math.floor(bit / 32)
+	local j = bit % 32
+	return getbits(getint(addr, i), j, j)
+end
+
 --init segment (section 4.3)
 
 local init_seg = {}
@@ -132,8 +138,8 @@ end
 
 --command queue (section 7.14.1)
 
-local cmd_queue = {}
-cmd_queue.__index = cmd_queue
+local cmdq = {}
+cmdq.__index = cmdq
 
 --init cmds
 local QUERY_HCA_CAP      = 0x100
@@ -149,7 +155,7 @@ local QUERY_ISSI         = 0x10A
 local SET_ISSI           = 0x10B
 local SET_DRIVER_VERSION = 0x10D
 
-function cmd_queue:new(addr, init_seg)
+function cmdq:new(addr, init_seg)
 	return setmetatable({
 		addr = ffi.cast('uint32_t*', addr),
 		init_seg = init_seg,
@@ -158,23 +164,33 @@ function cmd_queue:new(addr, init_seg)
 	}, self)
 end
 
-function cmd_queue:getbits(ofs, bit2, bit1)
+function cmdq:getbits(ofs, bit2, bit1)
 	return getbits(getint(self.addr, ofs), bit2, bit1)
 end
 
-function cmd_queue:setbits(ofs, bit2, bit1, val)
+function cmdq:setbits(ofs, bit2, bit1, val)
 	setint(self.addr, ofs, setbits(bit2, bit1, val))
 end
 
-function cmd_queue:setinbits(ofs, bit2, bit1, val)
+function cmdq:setinbits(ofs, bit2, bit1, val)
 	self:setbits(0x10 + ofs, bit2, bit1, val)
 end
 
-function cmd_queue:getoutbits(ofs, bit2, bit1)
+function cmdq:getoutbits(ofs, bit2, bit1)
 	return self:getbits(0x20 + ofs, bit2, bit1)
 end
 
-function cmd_queue:post(in_sz, out_sz)
+function cmdq:getoutaddr(ofs)
+	local ofs = (0x20 + ofs) / 4
+	assert(ofs == math.floor(ofs))
+	return self.addr + ofs
+end
+
+function cmdq:getbit(ofs, bit)
+	return getbit(self:getoutaddr(ofs), bit)
+end
+
+function cmdq:post(in_sz, out_sz)
 	local imptr = 0
 	local omptr = 0
 
@@ -205,10 +221,41 @@ function cmd_queue:post(in_sz, out_sz)
 	return status, signature, token
 end
 
-function cmd_queue:enable_hca()
+local errors = {
+	'signature error',
+	'token error',
+	'bad block number',
+	'bad output pointer. pointer not aligned to mailbox size',
+	'bad input pointer. pointer not aligned to mailbox size',
+	'internal error',
+	'input len error. input length less than 0x8',
+	'output len error. output length less than 0x8',
+	'reserved not zero',
+	'bad command type',
+}
+local function checkz(z)
+	if z == 0 then return end
+	error('command error: '..(errors[z] or z))
+end
+
+function cmdq:enable_hca()
 	self:setinbits(0x00, 31, 16, ENABLE_HCA)
-	local status = self:post(0x0C + 4, 0x08 + 4)
-	print(status)
+	checkz(self:post(0x0C + 4, 0x08 + 4))
+end
+
+function cmdq:query_issi()
+	self:setinbits(0x00, 31, 16, QUERY_ISSI)
+	checkz(self:post(0x0C + 4, 0x6C + 4))
+	local status   = self:getoutbits(0x00, 31, 24)
+	local syndrome = self:getoutbits(0x04, 31, 0)
+	local cur_ssi  = self:getoutbits(0x08, 15, 0)
+	print('status   ', status)
+	print('syndrome ', syndrome)
+	print('cur_ssi  ', cur_ssi)
+	print('sup_ssi  ')
+	for i=0,80-1 do
+		print(i, self:getbit(0x20, i))
+	end
 end
 
 function init_seg:dump()
@@ -237,6 +284,10 @@ function ConnectX4:new(arg)
 	--allocate and set the command queue which also initializes the nic
 	local cmdq_ptr, cmdq_phy = memory.dma_alloc(4096)
 	assert(band(cmdq_phy, 0xfff) == 0) --the phy address must be 4K-aligned
+	local cmdq = cmdq:new(cmdq_ptr, init_seg)
+
+	--8.2 HCA Driver Start-up
+
 	init_seg:cmdq_phy_addr(cmdq_phy)
 
 	--wait until the nic is ready
@@ -246,8 +297,23 @@ function ConnectX4:new(arg)
 
 	init_seg:dump()
 
-	local cmdq = cmd_queue:new(cmdq_ptr, init_seg)
 	cmdq:enable_hca()
+	cmdq:query_issi()
+
+	--[[
+	cmdq:set_issi()
+	cmdq:query_pages()
+	cmdq:manage_pages()
+	cmdq:query_hca_cap()
+	cmdq:set_hca_cap()
+	cmdq:query_pages()
+	cmdq:manage_pages()
+	cmdq:init_hca()
+	cmdq:set_driver_version()
+	cmdq:create_eq()
+	cmdq:query_vport_state()
+	cmdq:modify_vport_context()
+	]]
 
    function self:stop()
       if not base then return end
