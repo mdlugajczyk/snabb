@@ -238,6 +238,13 @@ local function checkz(z)
 	error('command error: '..(errors[z] or z))
 end
 
+function cmdq:checkstatus()
+	local status = self:getoutbits(0x00, 31, 24)
+	local syndrome = self:getoutbits(0x04, 31, 0)
+	if status == 0 then return end
+	error(string.format('status: %d, syndrome: %d', status, syndrome))
+end
+
 function cmdq:enable_hca()
 	self:setinbits(0x00, 31, 16, ENABLE_HCA)
 	checkz(self:post(0x0C + 4, 0x08 + 4))
@@ -246,8 +253,7 @@ end
 function cmdq:query_issi()
 	self:setinbits(0x00, 31, 16, QUERY_ISSI)
 	checkz(self:post(0x0C + 4, 0x6C + 4))
-	local status   = self:getoutbits(0x00, 31, 24)
-	local syndrome = self:getoutbits(0x04, 31, 0)
+	self:checkstatus()
 	local cur_issi = self:getoutbits(0x08, 15, 0)
 	local t = {}
 	for i=0,80-1 do
@@ -265,12 +271,7 @@ function cmdq:set_issi(issi)
 	self:setinbits(0x00, 31, 16, SET_ISSI)
 	self:setinbits(0x08, 15, 0, issi)
 	checkz(self:post(0x0C + 4, 0x0C + 4))
-	local status   = self:getoutbits(0x00, 31, 24)
-	local syndrome = self:getoutbits(0x04, 31, 0)
-	return {
-		status = status,
-		syndrome = syndrome,
-	}
+	self:checkstatus()
 end
 
 function cmdq:dump_issi(issi)
@@ -284,6 +285,19 @@ function cmdq:dump_issi(issi)
 	      '     %02d               ', i))
 		end
 	end
+end
+
+local which_code = {
+	boot = 1,
+	init = 2,
+	regular = 3,
+}
+function cmdq:query_pages(which)
+	self:setinbits(0x00, 31, 16, QUERY_PAGES)
+	self:setinbits(0x04, 15, 0, which_code[which])
+	checkz(self:post(0x0C + 4, 0x0C + 4))
+	self:checkstatus()
+	return self:getoutbits(0x0C, 31, 0)
 end
 
 function init_seg:dump()
@@ -330,9 +344,10 @@ function ConnectX4:new(arg)
 	cmdq:dump_issi(issi)
 	local t = cmdq:set_issi(0)
 	print('set_issi', t.status, t.syndrome)
+	local boot_pages = cmdq:query_pages'boot'
+	print("query_pages'boot'", boot_pages)
 
 	--[[
-	cmdq:query_pages()
 	cmdq:manage_pages()
 	cmdq:query_hca_cap()
 	cmdq:set_hca_cap()
