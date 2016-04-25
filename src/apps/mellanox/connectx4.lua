@@ -23,7 +23,7 @@ ConnectX4.__index = ConnectX4
 
 --utils
 
-local alloc_pages(pages)
+local function alloc_pages(pages)
    local ptr, phy = memory.dma_alloc(4096 * pages)
    assert(band(phy, 0xfff) == 0) --the phy address must be 4K-aligned
    return ptr, phy
