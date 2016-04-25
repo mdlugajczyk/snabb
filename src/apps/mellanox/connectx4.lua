@@ -23,6 +23,12 @@ ConnectX4.__index = ConnectX4
 
 --utils
 
+local alloc_pages(pages)
+   local ptr, phy = memory.dma_alloc(4096 * pages)
+   assert(band(phy, 0xfff) == 0) --the phy address must be 4K-aligned
+   return ptr, phy
+end
+
 function getint(addr, ofs)
    local ofs = ofs/4
    assert(ofs == floor(ofs))
@@ -155,9 +161,11 @@ local QUERY_ISSI         = 0x10A
 local SET_ISSI           = 0x10B
 local SET_DRIVER_VERSION = 0x10D
 
-function cmdq:new(addr, init_seg)
+function cmdq:new(addr, ib_addr, ob_addr, init_seg)
    return setmetatable({
       addr = ffi.cast('uint32_t*', addr),
+      ib_addr = ffi.cast('uint32_t*', ib_addr),
+      ob_addr = ffi.cast('uint32_t*', ob_addr),
       init_seg = init_seg,
       size = init_seg:log_cmdq_size(),
       stride = init_seg:log_cmdq_stride(),
@@ -173,7 +181,11 @@ function cmdq:setbits(ofs, bit2, bit1, val)
 end
 
 function cmdq:setinbits(ofs, bit2, bit1, val)
-   self:setbits(0x10 + ofs, bit2, bit1, val)
+   if ofs <= 12 then --inline
+      self:setbits(0x10 + ofs, bit2, bit1, val)
+   else --mailbox
+      self:setbits(
+   end
 end
 
 function cmdq:getoutbits(ofs, bit2, bit1)
@@ -188,37 +200,6 @@ end
 
 function cmdq:getbit(ofs, bit)
    return getbit(self:getoutaddr(ofs), bit)
-end
-
-function cmdq:post(in_sz, out_sz)
-   local imptr = 0
-   local omptr = 0
-
-   self:setbits(0x00, 31, 24, 0x7) --type
-
-   self:setbits(0x04, 31, 0, in_sz) --input_length
-   self:setbits(0x38, 31, 0, out_sz) --output_length
-
-   self:setbits(0x08, 31, 0, ptrbits(imptr, 63, 32))
-   self:setbits(0x0C, 31, 9, ptrbits(imptr, 31, 9))
-
-   self:setbits(0x30, 31, 0, ptrbits(omptr, 63, 32))
-   self:setbits(0x34, 31, 9, ptrbits(omptr, 31, 9))
-
-   self:setbits(0x3C, 0, 0, 1) --set ownership
-
-   self.init_seg:ring_doorbell(0) --post command
-
-   --poll for command completion
-   while self:getbits(0x3C, 0, 0) == 1 do
-      C.usleep(1000)
-   end
-
-   local token     = self:getbits(0x3C, 31, 24)
-   local signature = self:getbits(0x3C, 23, 16)
-   local status    = self:getbits(0x3C,  7,  1)
-
-   return status, signature, token
 end
 
 local errors = {
@@ -238,6 +219,36 @@ local function checkz(z)
    error('command error: '..(errors[z] or z))
 end
 
+function cmdq:post(in_sz, out_sz)
+   self:setbits(0x00, 31, 24, 0x7) --type
+
+   self:setbits(0x04, 31, 0, in_sz) --input_length
+   self:setbits(0x38, 31, 0, out_sz) --output_length
+
+   self:setbits(0x08, 31, 0, ptrbits(self.ib_addr, 63, 32))
+   self:setbits(0x0C, 31, 9, ptrbits(self.ib_addr, 31, 9))
+
+   self:setbits(0x30, 31, 0, ptrbits(self.ob_addr, 63, 32))
+   self:setbits(0x34, 31, 9, ptrbits(self.ob_addr, 31, 9))
+
+   self:setbits(0x3C, 0, 0, 1) --set ownership
+
+   self.init_seg:ring_doorbell(0) --post command
+
+   --poll for command completion
+   while self:getbits(0x3C, 0, 0) == 1 do
+      C.usleep(1000)
+   end
+
+   local token     = self:getbits(0x3C, 31, 24)
+   local signature = self:getbits(0x3C, 23, 16)
+   local status    = self:getbits(0x3C,  7,  1)
+
+   checkz(status)
+
+   return signature, token
+end
+
 --see 12.2 Return Status Summary
 function cmdq:checkstatus()
    local status = self:getoutbits(0x00, 31, 24)
@@ -248,12 +259,12 @@ end
 
 function cmdq:enable_hca()
    self:setinbits(0x00, 31, 16, ENABLE_HCA)
-   checkz(self:post(0x0C + 4, 0x08 + 4))
+   self:post(0x0C + 4, 0x08 + 4)
 end
 
 function cmdq:query_issi()
    self:setinbits(0x00, 31, 16, QUERY_ISSI)
-   checkz(self:post(0x0C + 4, 0x6C + 4))
+   self:post(0x0C + 4, 0x6C + 4)
    self:checkstatus()
    local cur_issi = self:getoutbits(0x08, 15, 0)
    local t = {}
@@ -269,7 +280,7 @@ end
 function cmdq:set_issi(issi)
    self:setinbits(0x00, 31, 16, SET_ISSI)
    self:setinbits(0x08, 15, 0, issi)
-   checkz(self:post(0x0C + 4, 0x0C + 4))
+   self:post(0x0C + 4, 0x0C + 4)
    self:checkstatus()
 end
 
@@ -292,7 +303,7 @@ local codes = {
 function cmdq:query_pages(which)
    self:setinbits(0x00, 31, 16, QUERY_PAGES)
    self:setinbits(0x04, 15, 0, codes[which])
-   checkz(self:post(0x0C + 4, 0x0C + 4))
+   self:post(0x0C + 4, 0x0C + 4)
    self:checkstatus()
    return self:getoutbits(0x0C, 31, 0)
 end
@@ -306,7 +317,7 @@ function cmdq:alloc_pages(addr, num_pages)
       self:setbits(0x10 + i*8, 31,  0, ptrbits(addr + 4096*i, 63, 32))
       self:setbits(0x14 + i*8, 31, 12, ptrbits(addr + 4096*i, 31, 12))
    end
-   checkz(self:post(0x10 + 4 + num_pages*8, 0x0C + 4))
+   self:post(0x10 + 4 + num_pages*8, 0x0C + 4)
    self:checkstatus()
 end
 
@@ -334,9 +345,10 @@ function ConnectX4:new(arg)
    local init_seg = init_seg:init(base)
 
    --allocate and set the command queue which also initializes the nic
-   local cmdq_ptr, cmdq_phy = memory.dma_alloc(4096)
-   assert(band(cmdq_phy, 0xfff) == 0) --the phy address must be 4K-aligned
-   local cmdq = cmdq:new(cmdq_ptr, init_seg)
+   local cmdq_ptr, cmdq_phy = alloc_pages(4096)
+   local ib_ptr, ib_phy = alloc_pages(4096)
+   local ob_ptr, ob_phy = alloc_pages(4096)
+   local cmdq = cmdq:new(cmdq_ptr, ib_ptr, ob_ptr, init_seg)
 
    --8.2 HCA Driver Start-up
 
