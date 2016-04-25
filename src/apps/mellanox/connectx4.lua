@@ -54,7 +54,7 @@ end
 local function getbit(addr, bit)
 	local i = math.floor(bit / 32)
 	local j = bit % 32
-	return getbits(getint(addr, i), j, j)
+	return getbits(getint(addr, i * 4), j, j)
 end
 
 --init segment (section 4.3)
