@@ -77,7 +77,7 @@ function init_seg:setbits(ofs, bit2, bit1, val)
 end
 
 function init_seg:init(ptr)
-   return setmetatable({ptr = ptr}, self)
+   return setmetatable({ptr = cast('uint32_t*', ptr)}, self)
 end
 
 function init_seg:fw_rev() --maj, min, subminor
@@ -186,7 +186,6 @@ end
 
 function cmdq:setinbits(ofs, bit2, bit1, val)
    assert(band(ofs, 3) == 0) --offset must be 4-byte aligned
-   print(ofs)
    if ofs <= 16 - 4 then --inline
       self:setbits(0x10 + ofs, bit2, bit1, val)
    else --input mailbox
