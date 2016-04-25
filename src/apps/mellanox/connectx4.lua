@@ -248,7 +248,7 @@ function cmdq:query_issi()
 	checkz(self:post(0x0C + 4, 0x6C + 4))
 	local status   = self:getoutbits(0x00, 31, 24)
 	local syndrome = self:getoutbits(0x04, 31, 0)
-	local cur_ssi  = self:getoutbits(0x08, 15, 0)
+	local cur_issi = self:getoutbits(0x08, 15, 0)
 	local t = {}
 	for i=0,80-1 do
 		t[i] = self:getbit(0x20, i) == 1 or nil
@@ -256,18 +256,30 @@ function cmdq:query_issi()
 	return {
 		status = status,
 		syndrome = syndrome,
-		cur_ssi = cur_ssi,
-		sup_ssi = t,
+		cur_issi = cur_ssi,
+		sup_issi = t,
+	}
+end
+
+function cmdq:set_issi(issi)
+	self:setinbits(0x00, 31, 16, SET_ISSI)
+	self:setinbits(0x08, 15, 0, issi)
+	checkz(self:post(0x0C + 4, 0x0C + 4))
+	local status   = self:getoutbits(0x00, 31, 24)
+	local syndrome = self:getoutbits(0x04, 31, 0)
+	return {
+		status = status,
+		syndrome = syndrome,
 	}
 end
 
 function cmdq:dump_issi(issi)
 	print('  status                ', issi.status)
 	print('  syndrome              ', issi.syndrome)
-	print('  cur_ssi               ', issi.cur_ssi)
-	print('  sup_ssi               ')
+	print('  cur_issi              ', issi.cur_issi)
+	print('  sup_issi              ')
 	for i=0,79 do
-		if issi.sup_ssi[i] then
+		if issi.sup_issi[i] then
 	print(string.format(
 	      '     %02d               ', i))
 		end
@@ -284,7 +296,6 @@ function init_seg:dump()
 	print('nic_interface_supported ', self:nic_interface_supported())
 	print('internal_timer          ', self:internal_timer())
 	print('health_syndrome         ', self:health_syndrome())
-	print('query_issi')
 end
 
 function ConnectX4:new(arg)
@@ -317,9 +328,10 @@ function ConnectX4:new(arg)
 	cmdq:enable_hca()
 	local issi = cmdq:query_issi()
 	cmdq:dump_issi(issi)
+	local t = cmdq:set_issi(0)
+	print('set_issi', t.status, t.syndrome)
 
 	--[[
-	cmdq:set_issi()
 	cmdq:query_pages()
 	cmdq:manage_pages()
 	cmdq:query_hca_cap()
