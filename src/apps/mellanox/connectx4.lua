@@ -299,7 +299,7 @@ end
 
 function cmdq:alloc_pages(addr, num_pages)
    self:setinbits(0x00, 31, 16, MANAGE_PAGES)
-   self:setinbits(0x04, 15, 0, 1) --allocs
+   self:setinbits(0x04, 15, 0, 1) --alloc
    self:setinbits(0x0C, 31, 0, num_pages)
    local addr = cast('char*', addr)
    for i=0, num_pages-1 do
@@ -357,6 +357,7 @@ function ConnectX4:new(arg)
 
    local boot_pages = cmdq:query_pages'boot'
    print("query_pages'boot'       ", boot_pages)
+   assert(boot_pages > 0)
 
    local bp_ptr, bp_phy = memory.dma_alloc(4096 * boot_pages)
    assert(band(bp_phy, 0xfff) == 0) --the phy address must be 4K-aligned
