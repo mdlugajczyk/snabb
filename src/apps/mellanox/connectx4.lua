@@ -261,6 +261,17 @@ function cmdq:query_issi()
 	}
 end
 
+function cmdq:dump_issi(issi)
+	print('  status                ', issi.status)
+	print('  syndrome              ', issi.syndrome)
+	print('  cur_ssi               ', issi.cur_ssi)
+	print('  sup_ssi               ')
+	for i=0,79 do
+	print(string.format(
+	      '     %02d               ', i), issi.sup_issi[i])
+	end
+end
+
 function init_seg:dump()
    print('fw_rev                  ', self:fw_rev())
    print('cmd_interface_rev       ', self:cmd_interface_rev())
@@ -272,16 +283,6 @@ function init_seg:dump()
 	print('internal_timer          ', self:internal_timer())
 	print('health_syndrome         ', self:health_syndrome())
 	print('query_issi')
-	local issi = self:query_issi()
-	print('  status                ', issi.status)
-	print('  syndrome              ', issi.syndrome)
-	print('  cur_ssi               ', issi.cur_ssi)
-	print('  sup_ssi               ')
-	for i=0,79 do
-	print(string.format(
-	      '     %02d               ', i), issi.sup_issi[i])
-	end
-
 end
 
 function ConnectX4:new(arg)
@@ -312,7 +313,8 @@ function ConnectX4:new(arg)
 	init_seg:dump()
 
 	cmdq:enable_hca()
-	cmdq:query_issi()
+	local issi = cmdq:query_issi()
+	cmdq:dump_issi(issi)
 
 	--[[
 	cmdq:set_issi()
