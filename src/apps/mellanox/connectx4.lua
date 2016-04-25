@@ -373,6 +373,8 @@ function ConnectX4:new(arg)
 
    local issi = cmdq:query_issi()
    cmdq:dump_issi(issi)
+
+   --[[
    cmdq:set_issi(0)
 
    local boot_pages = cmdq:query_pages'boot'
@@ -382,6 +384,7 @@ function ConnectX4:new(arg)
    local bp_ptr, bp_phy = memory.dma_alloc(4096 * boot_pages)
    assert(band(bp_phy, 0xfff) == 0) --the phy address must be 4K-aligned
    cmdq:alloc_pages(bp_phy, boot_pages)
+   ]]
 
    --[[
    cmdq:query_hca_cap()
