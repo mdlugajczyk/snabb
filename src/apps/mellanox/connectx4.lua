@@ -165,6 +165,7 @@ function cmdq:new(init_seg)
    local ptr, phy = alloc_pages(1)
    local ib_ptr, ib_phy = alloc_pages(1)
    local ob_ptr, ob_phy = alloc_pages(1)
+   print(ptr, phy)
    return setmetatable({
       ptr = ptr,
       phy = phy,
