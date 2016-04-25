@@ -165,12 +165,11 @@ function cmdq:new(init_seg)
    local ptr, phy = alloc_pages(1)
    local ib_ptr, ib_phy = alloc_pages(1)
    local ob_ptr, ob_phy = alloc_pages(1)
-   print(ptr, phy)
    return setmetatable({
-      ptr = ptr,
+      ptr = cast('uint32_t*', ptr),
       phy = phy,
-      ib_ptr = ib_ptr,
-      ob_ptr = ob_ptr,
+      ib_ptr = cast('uint32_t*', ib_ptr),
+      ob_ptr = cast('uint32_t*', ob_ptr),
       init_seg = init_seg,
       size = init_seg:log_cmdq_size(),
       stride = init_seg:log_cmdq_stride(),
