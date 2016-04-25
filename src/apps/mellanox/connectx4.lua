@@ -260,8 +260,6 @@ function cmdq:query_issi()
 		t[i] = self:getbit(0x20, i) == 1 or nil
 	end
 	return {
-		status = status,
-		syndrome = syndrome,
 		cur_issi = cur_issi,
 		sup_issi = t,
 	}
