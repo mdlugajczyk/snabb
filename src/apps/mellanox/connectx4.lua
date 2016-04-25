@@ -251,7 +251,7 @@ function cmdq:query_issi()
 	local cur_ssi  = self:getoutbits(0x08, 15, 0)
 	local t = {}
 	for i=0,80-1 do
-		t[i] = self:getbit(0x20, i) == 1
+		t[i] = self:getbit(0x20, i) == 1 or nil
 	end
 	return {
 		status = status,
@@ -267,8 +267,10 @@ function cmdq:dump_issi(issi)
 	print('  cur_ssi               ', issi.cur_ssi)
 	print('  sup_ssi               ')
 	for i=0,79 do
+		if issi.sup_ssi[i] then
 	print(string.format(
-	      '     %02d               ', i), issi.sup_ssi[i])
+	      '     %02d               ', i))
+		end
 	end
 end
 
