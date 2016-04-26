@@ -379,11 +379,9 @@ function ConnectX4:new(arg)
    local issi = cmdq:query_issi()
    cmdq:dump_issi(issi)
 
-   cmdq:disable_hca()
-
-   --[[
    cmdq:set_issi(0)
 
+   --[[
    local boot_pages = cmdq:query_pages'boot'
    print("query_pages'boot'       ", boot_pages)
    assert(boot_pages > 0)
@@ -407,6 +405,9 @@ function ConnectX4:new(arg)
 
    function self:stop()
       if not base then return end
+      if cmdq then
+         cmdq:disable_hca()
+      end
       pci.set_bus_master(pciaddress, false)
       pci.close_pci_resource(fd, base)
       base, fd = nil
