@@ -631,6 +631,8 @@ function ConnectX4:new(arg)
 end
 
 function selftest()
+   io.stdout:setvbuf'no'
+
    local pcidev1 = lib.getenv("SNABB_PCI_CONNECTX40") or lib.getenv("SNABB_PCI0")
    local pcidev2 = lib.getenv("SNABB_PCI_CONNECTX41") or lib.getenv("SNABB_PCI1")
    if not pcidev1
