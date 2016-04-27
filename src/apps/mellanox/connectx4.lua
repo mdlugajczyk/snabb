@@ -453,9 +453,9 @@ function cmdq:set_hca_cap(which_caps, caps)
       self:setinbits(0x2C,
          31, 31, caps.end_pad,
          28, 28, caps.start_pad,
-         27, 27, caps.cache_line_128byte
+         27, 27, caps.cache_line_128byte)
       self:setinbits(0x30,
-         30, 30, caps.vport_counters,
+         30, 30, caps.vport_counters)
       self:setinbits(0x34,
          31, 31, caps.vport_group_manager,
          25, 25, caps.nic_flow_table,
