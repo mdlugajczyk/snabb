@@ -500,7 +500,7 @@ function cmdq:set_hca_cap(which_caps, caps)
          28, 24, caps.log_max_rq,
          20, 16, caps.log_max_sq,
          12,  8, caps.log_max_tir,
-          4   0, caps.log_max_tis)
+          4,  0, caps.log_max_tis)
       self:setinbits(0x70,
          31, 31, caps.basic_cyclic_rcv_wqe,
          28, 24, caps.log_max_rmp,
