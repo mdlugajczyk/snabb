@@ -495,7 +495,7 @@ function cmdq:set_hca_cap(which_caps, caps)
          28, 24, caps.log_max_transport_domain,
          20, 16, caps.log_max_pd)
       self:setinbits(0x68,
-         15,  0, caps.max_flow_counter,
+         15,  0, caps.max_flow_counter)
       self:setinbits(0x6C,
          28, 24, caps.log_max_rq,
          20, 16, caps.log_max_sq,
