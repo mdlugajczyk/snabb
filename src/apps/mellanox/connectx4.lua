@@ -410,7 +410,7 @@ function cmdq:query_hca_cap(max_cur, which_caps) --max_cur: 'max' or 'current'
       caps.log_max_rq               = self:getoutbits(0x6C, 28, 24)
       caps.log_max_sq               = self:getoutbits(0x6C, 20, 16)
       caps.log_max_tir              = self:getoutbits(0x6C, 12,  8)
-      caps.log_max_tis              = self:getoutbits(0x6C,  4   0)
+      caps.log_max_tis              = self:getoutbits(0x6C,  4,  0)
       caps.basic_cyclic_rcv_wqe     = self:getoutbits(0x70, 31, 31)
       caps.log_max_rmp              = self:getoutbits(0x70, 28, 24)
       caps.log_max_rqt              = self:getoutbits(0x70, 20, 16)
@@ -440,106 +440,105 @@ function cmdq:set_hca_cap(which_caps, caps)
    self:setinbits(0x04, 15,  1, caps[which_caps])
    if which_caps == 'general' then
       self:setinbits(0x18,
-         23, 16, caps.log_max_cq_sz, -- Log (base 2) of the Maximum CQEs allowed in a CQ
-         4,   0, caps.log_max_cq)    -- Log (base 2) of the Maximum number of CQs supported
+         23, 16, caps.log_max_cq_sz,
+         4,   0, caps.log_max_cq)
       self:setinbits(0x1C,
-         31, 24, caps.log_max_eq_sz, -- Log (base 2) of the Maximum EQEs allowed in an EQ
-         21, 16, caps.log_max_mkey,  -- Log (base 2) of the maximum number of data MKey entries
-         3,   0, caps.log_max_eq)    -- Log (base 2) of the Maximum number of EQs
+         31, 24, caps.log_max_eq_sz,
+         21, 16, caps.log_max_mkey,
+         3,   0, caps.log_max_eq)
       self:setinbits(0x20,
-         31, 24, caps.max_indirection, -- Maximum level of Mkey indirection supported
-         22, 16, caps.log_max_mrw_sz,  -- Log (base 2) of the maximum size of a Memory Region/Window
-         5,   0, caps.log_max_klm_list_size) -- Log (base 2) of the Maximum indirect klm entries list
+         31, 24, caps.max_indirection,
+         22, 16, caps.log_max_mrw_sz,
+         5,   0, caps.log_max_klm_list_size)
       self:setinbits(0x2C,
-         31, 31, caps.end_pad,             -- End Padding in RX messages is supported.
-         28, 28, caps.start_pad,           -- Start Padding in RX messages is supported.
-         27, 27, caps.cache_line_128byte   -- If set, 128 byte Cache line size is supported.
+         31, 31, caps.end_pad,
+         28, 28, caps.start_pad,
+         27, 27, caps.cache_line_128byte
       self:setinbits(0x30,
-         30, 30, caps.vport_counters,      -- If set, vport counters are supported.
+         30, 30, caps.vport_counters,
       self:setinbits(0x34,
-         31, 31, caps.vport_group_manager, -- Virtual port group manager. for enabling other vports.
-         25, 25, caps.nic_flow_table,      -- If set, nic flow table mechanism is supported.
-          9,  8, caps.port_type,           -- Indicates port type
-          7,  0, caps.num_ports)           -- Number of network ports.
+         31, 31, caps.vport_group_manager,
+         25, 25, caps.nic_flow_table,
+          9,  8, caps.port_type,
+          7,  0, caps.num_ports)
       self:setinbits(0x38,
-         28, 24, caps.log_max_msg,         -- Log (base 2) of the maximum message size in bytes
-         19, 16, caps.max_tc)              -- Number of Traffic Classes supported.
+         28, 24, caps.log_max_msg,
+         19, 16, caps.max_tc)
       self:setinbits(0x3C,
-          3,   0, caps.cqe_version)         -- CQE version.
+          3,   0, caps.cqe_version)
       self:setinbits(0x40,
          15, 14, caps.cmdif_checksum,
-         11, 11, caps.wq_signature,         -- WQE signature check on SQ
-         10, 10, caps.sctr_data_cqe,        -- Scatter Data to CQE supported
-          3,  3, caps.eth_net_offloads)     -- If set, Ethernet networking offloads are supported.
+         11, 11, caps.wq_signature,
+         10, 10, caps.sctr_data_cqe,
+          3,  3, caps.eth_net_offloads)
       self:setinbits(0x44,
-         31, 31, caps.cq_oi,                -- If set, cq.oi can be modified by MODIFY_CQ command.
-         30, 30, caps.cq_resize,            -- If set, resizing cq is enabled.
-         29, 29, caps.cq_moderation,        -- If set, cq moderation is enabled by MODIFY_CQ Command.
-         25, 25, caps.cq_eq_remap,          -- If set, cq.eqn can be modified by MODIFY_CQ.
-         21, 21, caps.scqe_break_moderation, -- Completion Event Moderation breakage supported.
-         20, 20, caps.cq_period_start_from_cqe, -- If set, cq_period_mode =1 is supported.
-         14, 14, caps.imaicl,               -- Internal mkey access is considered local.
-          3,  3, caps.xrc,                  -- If set, XRC transport is supported
-          2,  2, caps.ud,                   -- If set, UD Transport is supported
-          1,  1, caps.uc,                   -- If set, UC Transport is supported
-          0,  0, caps.rc)                   -- If set, RC Transport is supported
+         31, 31, caps.cq_oi,
+         30, 30, caps.cq_resize,
+         29, 29, caps.cq_moderation,
+         25, 25, caps.cq_eq_remap,
+         21, 21, caps.scqe_break_moderation,
+         20, 20, caps.cq_period_start_from_cqe,
+         14, 14, caps.imaicl,
+          3,  3, caps.xrc,
+          2,  2, caps.ud,
+          1,  1, caps.uc,
+          0,  0, caps.rc)
       self:setinbits(0x48,
-         21, 16, caps.uar_sz,               -- UAR Area Size = 1MB * 2^uar_sz
-          7,  0, caps.log_pg_sz)            -- Log (base 2) of the minimum system page size supported.
+         21, 16, caps.uar_sz,
+          7,  0, caps.log_pg_sz)
       self:setinbits(0x4C,
-         31, 31, caps.bf,                   -- If set to ‘1’ then BlueFlame may be used
-         30, 30, caps.driver_version,       -- If set, SET_DRIVER_VERSION command is supported
-         29, 29, caps.pad_tx_eth_packet,    -- If set, device pads Ethernet packets to 64 bytes.
-         20, 16, caps.log_bf_reg_size,      -- Log (base 2) of BlueFlame max register size in bytes.
+         31, 31, caps.bf,
+         30, 30, caps.driver_version,
+         29, 29, caps.pad_tx_eth_packet,
+         20, 16, caps.log_bf_reg_size,
       self:setinbits(0x64,
-         28, 24, caps.log_max_transport_domain,  -- Log (base 2) of the maximum number of Transport Domains.
-         20, 16, caps.log_max_pd,                -- Log (base 2) of the maximum number of PDs.
+         28, 24, caps.log_max_transport_domain,
+         20, 16, caps.log_max_pd,
       self:setinbits(0x68,
-         15,  0, caps.max_flow_counter,     -- Maximum number of flow counters.
+         15,  0, caps.max_flow_counter,
       self:setinbits(0x6C,
-         28, 24, caps.log_max_rq,           -- Log (base2) of the number of RQ supported.
-         20, 16, caps.log_max_sq,           -- Log (base2) of the number of SQ supported.
-         12,  8, caps.log_max_tir,          -- Log (base2) of the number of TIR supported.
-          4   0, caps.log_max_tis,          -- Log (base2) of the number of TIS supported.
+         28, 24, caps.log_max_rq,
+         20, 16, caps.log_max_sq,
+         12,  8, caps.log_max_tir,
+          4   0, caps.log_max_tis,
       self:setinbits(0x70,
          31, 31, caps.basic_cyclic_rcv_wqe,
-         28, 24, caps.log_max_rmp,          -- Log (base2) of the number of RMPs supported.
-         20, 16, caps.log_max_rqt,          -- Log (base2) of the number of RQTs supported.
-         12,  8, caps.log_max_rqt_size,     -- Log (base2) of max RQT size.
-          4,  0, caps.log_max_tis_per_sq,   -- Log (base2) of the number of TIS supported per SQ.
+         28, 24, caps.log_max_rmp,
+         20, 16, caps.log_max_rqt,
+         12,  8, caps.log_max_rqt_size,
+          4,  0, caps.log_max_tis_per_sq,
       self:setinbits(0x74,
-         28, 24, caps.log_max_stride_sz_rq, -- Log (base2) of the maximum size (in bytes) of RQ stride.
-         20, 16, caps.log_min_stride_sz_rq, -- Log (base2) of the minimum size (in bytes) of RQ stride.
-         12,  8, caps.log_max_stride_sz_sq, -- Log (base2) of the maximum size (in bytes) of SQ stride.
-          4,  0, caps.log_min_stride_sz_sq, -- Log (base2) of the minimum size (in bytes) of SQ stride.
+         28, 24, caps.log_max_stride_sz_rq,
+         20, 16, caps.log_min_stride_sz_rq,
+         12,  8, caps.log_max_stride_sz_sq,
+          4,  0, caps.log_min_stride_sz_sq,
       self:setinbits(0x78,
-          4,  0, caps.log_max_wq_sz)        -- Log (base 2) of the maximum number of WQEs allowed on the WQ.
+          4,  0, caps.log_max_wq_sz)
       self:setinbits(0x7C,
-         20, 16, caps.log_max_vlan_list,    -- Log (base2) of the maximum size of vlan list
-         12,  8, caps.log_max_current_mc_list, -- Log (base2) of max size of current_mc_mac_address list
-          4,  0, caps.log_max_current_uc_list, --Log (base2) of max size of current_uc_mac_address list
+         20, 16, caps.log_max_vlan_list,
+         12,  8, caps.log_max_current_mc_list,
+          4,  0, caps.log_max_current_uc_list,
       self:setinbits(0x90,
-         28, 24, caps.log_max_l2_table,     -- Log (base2) of the maximum size of L2 Table.
-         15,  0, caps.log_uar_page_sz,      -- Log (base 2) of UAR page in 4Kbyte chunks.
+         28, 24, caps.log_max_l2_table,
+         15,  0, caps.log_uar_page_sz,
       self:setinbits(0x98,
-         31,  0, caps.device_frequency_mhz) -- Internal device frequency given in MHz.
+         31,  0, caps.device_frequency_mhz)
    elseif which_caps == 'offload' then
       self:setinbits(0x00,
-         31, 31, caps.csum_cap,             -- Checksum Offload capability is supported
-         30, 30, caps.vlan_cap,             -- VLAN adding and stripping offload capability is supported
-         29, 29, caps.lro_cap,              -- LRO hardware offload is supported
-         28, 28, caps.lro_psh_flag,         -- supports LRO for segments with a TCP PSH bit enabled.
-         27, 27, caps.lro_time_stamp,       -- supports LRO for segments with a TCP Timestamp option.
-         26, 25, caps.lro_max_msg_sz_mode,  -- reports which LRO max message size mode the device supports.
-         23, 23, caps.self_lb_en_modifiable, -- If set, self_lb_en in TIR Context is modifiable.
-         22, 22, caps.self_lb_mc,           -- If set, self-loopback for multicast is supported.
-         21, 21, caps.self_lb_uc,           -- If set, self-loopback for unicast is supported.
-         20, 16, caps.max_lso_cap,          -- Log (base2) of the maximum LSO message supported.
-         13, 12, caps.wqe_inline_mode,      -- Wqe inline mode
-         11,  8, caps.rss_ind_tbl_cap,      -- Log (base2) of the maximum RSS indirection table size
+         31, 31, caps.csum_cap,
+         30, 30, caps.vlan_cap,
+         29, 29, caps.lro_cap,
+         28, 28, caps.lro_psh_flag,
+         27, 27, caps.lro_time_stamp,
+         26, 25, caps.lro_max_msg_sz_mode,
+         23, 23, caps.self_lb_en_modifiable,
+         22, 22, caps.self_lb_mc,
+         21, 21, caps.self_lb_uc,
+         20, 16, caps.max_lso_cap,
+         13, 12, caps.wqe_inline_mode,
+         11,  8, caps.rss_ind_tbl_cap,
       self:setinbits(0x08,
-         15,  0, caps.lro_min_mss_size)     -- Minimal TCP payload size required for LRO.
-      -- Array of supported LRO timer periods in microseconds
+         15,  0, caps.lro_min_mss_size)
       for i = 1, 4 do
          self:setinbits(0x30 + (i-1)*4, 31, 0, caps.lro_timer_supported_periods[i])
       end
