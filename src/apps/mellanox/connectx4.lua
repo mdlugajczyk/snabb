@@ -490,37 +490,37 @@ function cmdq:set_hca_cap(which_caps, caps)
          31, 31, caps.bf,
          30, 30, caps.driver_version,
          29, 29, caps.pad_tx_eth_packet,
-         20, 16, caps.log_bf_reg_size,
+         20, 16, caps.log_bf_reg_size)
       self:setinbits(0x64,
          28, 24, caps.log_max_transport_domain,
-         20, 16, caps.log_max_pd,
+         20, 16, caps.log_max_pd)
       self:setinbits(0x68,
          15,  0, caps.max_flow_counter,
       self:setinbits(0x6C,
          28, 24, caps.log_max_rq,
          20, 16, caps.log_max_sq,
          12,  8, caps.log_max_tir,
-          4   0, caps.log_max_tis,
+          4   0, caps.log_max_tis)
       self:setinbits(0x70,
          31, 31, caps.basic_cyclic_rcv_wqe,
          28, 24, caps.log_max_rmp,
          20, 16, caps.log_max_rqt,
          12,  8, caps.log_max_rqt_size,
-          4,  0, caps.log_max_tis_per_sq,
+          4,  0, caps.log_max_tis_per_sq)
       self:setinbits(0x74,
          28, 24, caps.log_max_stride_sz_rq,
          20, 16, caps.log_min_stride_sz_rq,
          12,  8, caps.log_max_stride_sz_sq,
-          4,  0, caps.log_min_stride_sz_sq,
+          4,  0, caps.log_min_stride_sz_sq)
       self:setinbits(0x78,
           4,  0, caps.log_max_wq_sz)
       self:setinbits(0x7C,
          20, 16, caps.log_max_vlan_list,
          12,  8, caps.log_max_current_mc_list,
-          4,  0, caps.log_max_current_uc_list,
+          4,  0, caps.log_max_current_uc_list)
       self:setinbits(0x90,
          28, 24, caps.log_max_l2_table,
-         15,  0, caps.log_uar_page_sz,
+         15,  0, caps.log_uar_page_sz)
       self:setinbits(0x98,
          31,  0, caps.device_frequency_mhz)
    elseif which_caps == 'offload' then
@@ -536,7 +536,7 @@ function cmdq:set_hca_cap(which_caps, caps)
          21, 21, caps.self_lb_uc,
          20, 16, caps.max_lso_cap,
          13, 12, caps.wqe_inline_mode,
-         11,  8, caps.rss_ind_tbl_cap,
+         11,  8, caps.rss_ind_tbl_cap)
       self:setinbits(0x08,
          15,  0, caps.lro_min_mss_size)
       for i = 1, 4 do
