@@ -60,7 +60,7 @@ end
 local function setbits(...) --bit2, bit1, val, ...
    local endval = 0
    for i = 1, select('#', ...), 3 do
-      local bit1, bit2, val = select(i, ...)
+      local bit2, bit1, val = select(i, ...)
       endval = bor(endval, setbits1(bit2, bit1, val or 0))
    end
    return endval
