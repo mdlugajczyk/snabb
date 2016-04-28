@@ -350,16 +350,20 @@ function cmdq:alloc_pages(addr, num_pages)
    self:checkstatus()
 end
 
-local caps = {
+local what_codes = {
+   max = 0,
+   cur = 1,
+}
+local which_codes = {
    general = 0,
    offload = 1,
    flow_table = 7,
 }
-function cmdq:query_hca_cap(max_cur, which_caps) --max_cur: 'max' or 'current'
+function cmdq:query_hca_cap(what, which)
    self:setinbits(0x00, 31, 16, QUERY_HCA_CAP)
    self:setinbits(0x04,
-      15,  1, caps[which_caps],
-       0,  0, max_cur == 'current' and 1 or 0)
+      15,  1, assert(which_codes[which]),
+       0,  0, assert(what_codes[what]))
    self:post(0x0C + 4, 0x100C + 4)
    self:checkstatus()
    local caps = {}
@@ -435,9 +439,9 @@ function cmdq:query_hca_cap(max_cur, which_caps) --max_cur: 'max' or 'current'
    return caps
 end
 
-function cmdq:set_hca_cap(which_caps, caps)
+function cmdq:set_hca_cap(which, caps)
    self:setinbits(0x00, 31, 16, SET_HCA_CAP)
-   self:setinbits(0x04, 15,  1, caps[which_caps])
+   self:setinbits(0x04, 15,  1, assert(which_codes[which]))
    if which_caps == 'general' then
       self:setinbits(0x18,
          23, 16, caps.log_max_cq_sz,
@@ -601,7 +605,7 @@ function ConnectX4:new(arg)
    assert(band(bp_phy, 0xfff) == 0) --the phy address must be 4K-aligned
    cmdq:alloc_pages(bp_phy, boot_pages)
 
-   local t = cmdq:query_hca_cap()
+   local t = cmdq:query_hca_cap('cur', 'general')
    print'query_hca_cap:'
    for k,v in pairs(t) do
       print('', k, v)
