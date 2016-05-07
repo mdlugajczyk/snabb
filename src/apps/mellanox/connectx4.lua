@@ -278,7 +278,7 @@ function cmdq:checkstatus()
    local status = self:getoutbits(0x00, 31, 24)
    local syndrome = self:getoutbits(0x04, 31, 0)
    if status == 0 then return end
-   error(string.format('status: %xh, syndrome: %d', status, syndrome))
+   error(string.format('status: 0x%x, syndrome: %d', status, syndrome))
 end
 
 function cmdq:enable_hca()
@@ -364,7 +364,7 @@ function cmdq:query_hca_cap(what, which)
    self:setinbits(0x04,
       15,  1, assert(which_codes[which]),
        0,  0, assert(what_codes[what]))
-   self:post(0x0C + 4, 0x10 + 4)
+   self:post(0x0C + 4, 0x100C + 4)
    self:checkstatus()
    local caps = {}
    if which_caps == 'general' then
