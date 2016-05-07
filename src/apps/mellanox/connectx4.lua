@@ -283,17 +283,17 @@ end
 
 function cmdq:enable_hca()
    self:setinbits(0x00, 31, 16, ENABLE_HCA)
-   self:post(0x0C + 4, 0x08 + 4)
+   self:post(0x0C, 0x08)
 end
 
 function cmdq:disable_hca()
    self:setinbits(0x00, 31, 16, DISABLE_HCA)
-   self:post(0x0C + 4, 0x08 + 4)
+   self:post(0x0C, 0x08)
 end
 
 function cmdq:query_issi()
    self:setinbits(0x00, 31, 16, QUERY_ISSI)
-   self:post(0x0C + 4, 0x6C + 4)
+   self:post(0x0C, 0x6C)
    self:checkstatus()
    local cur_issi = self:getoutbits(0x08, 15, 0)
    local t = {}
@@ -309,7 +309,7 @@ end
 function cmdq:set_issi(issi)
    self:setinbits(0x00, 31, 16, SET_ISSI)
    self:setinbits(0x08, 15, 0, issi)
-   self:post(0x0C + 4, 0x0C + 4)
+   self:post(0x0C, 0x0C)
    self:checkstatus()
 end
 
@@ -332,7 +332,7 @@ local codes = {
 function cmdq:query_pages(which)
    self:setinbits(0x00, 31, 16, QUERY_PAGES)
    self:setinbits(0x04, 15, 0, codes[which])
-   self:post(0x0C + 4, 0x0C + 4)
+   self:post(0x0C, 0x0C)
    self:checkstatus()
    return self:getoutbits(0x0C, 31, 0)
 end
@@ -346,7 +346,7 @@ function cmdq:alloc_pages(addr, num_pages)
       self:setinbits(0x10 + i*8, 31,  0, ptrbits(addr + 4096*i, 63, 32))
       self:setinbits(0x14 + i*8, 31, 12, ptrbits(addr + 4096*i, 31, 12))
    end
-   self:post(0x10 + 4 + num_pages*8, 0x0C + 4)
+   self:post(0x10 + num_pages*8, 0x0C)
    self:checkstatus()
 end
 
@@ -364,7 +364,7 @@ function cmdq:query_hca_cap(what, which)
    self:setinbits(0x04,
       15,  1, assert(which_codes[which]),
        0,  0, assert(what_codes[what]))
-   self:post(0x0C + 4, 0x1000 + 4)
+   self:post(0x0C, 0x100C)
    self:checkstatus()
    local caps = {}
    if which_caps == 'general' then
@@ -549,7 +549,7 @@ function cmdq:set_hca_cap(which, caps)
    elseif which_caps == 'flow_table' then
       --TODO
    end
-   self:post(0x100C + 4, 0x0C + 4)
+   self:post(0x100C, 0x0C)
    self:checkstatus()
 end
 
