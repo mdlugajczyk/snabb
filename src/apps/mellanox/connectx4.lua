@@ -278,7 +278,7 @@ function cmdq:checkstatus()
    local status = self:getoutbits(0x00, 31, 24)
    local syndrome = self:getoutbits(0x04, 31, 0)
    if status == 0 then return end
-   error(string.format('status: %x, syndrome: %d', status, syndrome))
+   error(string.format('status: %xh, syndrome: %d', status, syndrome))
 end
 
 function cmdq:enable_hca()
