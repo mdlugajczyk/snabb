@@ -364,7 +364,7 @@ function cmdq:query_hca_cap(what, which)
    self:setinbits(0x04,
       15,  1, assert(which_codes[which]),
        0,  0, assert(what_codes[what]))
-   self:post(0x0C + 4, 0x1000 + 4)
+   self:post(0x0C + 4, 0x20 + 4)
    self:checkstatus()
    local caps = {}
    if which_caps == 'general' then
