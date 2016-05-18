@@ -103,6 +103,7 @@ end
 
 function init_seg:cmdq_phy_addr(addr)
    if addr then
+      print("addr", addr)
       --must write the MSB of the addr first
       self:setbits(0x10, 31, 0, ptrbits(addr, 63, 32))
       --also resets nic_interface and log_cmdq_*
@@ -168,6 +169,8 @@ local QUERY_PAGES        = 0x107
 local MANAGE_PAGES       = 0x108
 local SET_HCA_CAP        = 0x109
 local QUERY_ISSI         = 0x10A
+--local QUERY_ISSI         = 0x010A
+--local QUERY_ISSI         = 0x0A01
 local SET_ISSI           = 0x10B
 local SET_DRIVER_VERSION = 0x10D
 
@@ -179,11 +182,19 @@ function cmdq:new(init_seg)
       ptr = ptr,
       phy = phy,
       ib_ptr = ib_ptr,
+      ib_phy = ib_phy,
       ob_ptr = ob_ptr,
+      ob_phy = ob_phy,
       init_seg = init_seg,
       size = init_seg:log_cmdq_size(),
       stride = init_seg:log_cmdq_stride(),
    }, self)
+end
+
+function cmdq:reset()
+--   ffi.fill(self.ptr, 4096)
+   ffi.fill(self.ib_ptr, 4096, 0xff)
+   ffi.fill(self.ob_ptr, 4096, 0xff)
 end
 
 function cmdq:getbits(ofs, bit2, bit1)
@@ -243,25 +254,66 @@ end
 function cmdq:post(last_in_ofs, last_out_ofs)
    local in_sz  = last_in_ofs + 4
    local out_sz = last_out_ofs + 4
+   print("in_sz", in_sz, "out_sz", out_sz)
+
+   self:reset()
 
    self:setbits(0x00, 31, 24, 0x7) --type
 
    self:setbits(0x04, 31, 0, in_sz) --input_length
    self:setbits(0x38, 31, 0, out_sz) --output_length
 
-   self:setbits(0x08, 31, 0, ptrbits(self.ib_addr, 63, 32))
-   self:setbits(0x0C, 31, 9, ptrbits(self.ib_addr, 31, 9))
+   print("ib_phy", ffi.cast("void*", self.ib_phy))
+   self:setbits(0x08, 31, 0, ptrbits(self.ib_phy, 63, 32))
+   self:setbits(0x0C, 31, 0, ptrbits(self.ib_phy, 31, 0))
 
-   self:setbits(0x30, 31, 0, ptrbits(self.ob_addr, 63, 32))
-   self:setbits(0x34, 31, 9, ptrbits(self.ob_addr, 31, 9))
+   print("ob_phy", ffi.cast("void*", self.ob_phy))
+   self:setbits(0x30, 31, 0, ptrbits(self.ob_phy, 63, 32))
+   self:setbits(0x34, 31, 0, ptrbits(self.ob_phy, 31, 0))
 
    self:setbits(0x3C, 0, 0, 1) --set ownership
+   assert(self:getbits(0x3C, 0, 0) == 1)
+
+   print("BEFORE DOORBELL")
+   local binmsg = require("apps.mellanox.binmsg")
+   local msg = binmsg.new()
+   msg:def('type', 1, 'intBE')
+   msg:def('pad0', 3, 'intBE', {constant = 0})
+   msg:def('input_length', 4, 'intBE')
+   msg:def('mailbox_pointer_hi', 4, 'intBE')
+   msg:def('mailbox_pointer_lo', 4, 'intBE',
+           {valid = function (v) return v % 256 == 0 end})
+   msg:def('command', 2, 'intBE')
+
+   for i = 0, 0x40, 0x10 do
+      print(bit.tohex(i, 4) .. ": " .. lib.hexdump(ffi.string(ffi.cast("char*", self.ptr) + i, 0x10)))
+   end
+
+   for k,v in pairs(msg:decode(self.ptr)) do
+      print(k,v,bit.tohex(v))
+   end
 
    self.init_seg:ring_doorbell(0) --post command
 
    --poll for command completion
+   print("POLLING")
    while self:getbits(0x3C, 0, 0) == 1 do
-      C.usleep(1000)
+      C.usleep(100000)
+   end
+   C.usleep(1000)
+
+   print("AFTER DOORBELL")
+   print("CMD")
+   for i = 0, 0x40, 0x10 do
+      print(bit.tohex(i, 4) .. ": " .. lib.hexdump(ffi.string(ffi.cast("char*", self.ptr) + i, 0x10)))
+   end
+   print("IN")
+   for i = 0, 0x40, 0x10 do
+      print(bit.tohex(i, 4) .. ": " .. lib.hexdump(ffi.string(ffi.cast("char*", self.ib_ptr) + i, 0x10)))
+   end
+   print("OUT")
+   for i = 0, 0x40, 0x10 do
+      print(bit.tohex(i, 4) .. ": " .. lib.hexdump(ffi.string(ffi.cast("char*", self.ob_ptr) + i, 0x10)))
    end
 
    local token     = self:getbits(0x3C, 31, 24)
@@ -278,7 +330,8 @@ function cmdq:checkstatus()
    local status = self:getoutbits(0x00, 31, 24)
    local syndrome = self:getoutbits(0x04, 31, 0)
    if status == 0 then return end
-   error(string.format('status: 0x%x, syndrome: %d', status, syndrome))
+   error(string.format('status: 0x%x (%s), syndrome: %d',
+                       status, errors[status], syndrome))
 end
 
 function cmdq:enable_hca()
@@ -292,13 +345,15 @@ function cmdq:disable_hca()
 end
 
 function cmdq:query_issi()
+--   self:reset()
    self:setinbits(0x00, 31, 16, QUERY_ISSI)
    self:post(0x0C, 0x6C)
    self:checkstatus()
+   print(lib.hexdump(ffi.string(self.ib_ptr, 0x6C)))
    local cur_issi = self:getoutbits(0x08, 15, 0)
    local t = {}
    for i=0,80-1 do
-      t[i] = self:getbit(0x20, i) == 1 or nil
+      t[i] = (self:getbit(0x20, i) == 1) or (self:getbit(0, i) == 1) or nil
    end
    return {
       cur_issi = cur_issi,
@@ -574,6 +629,7 @@ function ConnectX4:new(arg)
    pci.set_bus_master(pciaddress, true)
    local base, fd = pci.map_pci_memory(pciaddress, 0)
 
+   trace("Read the initialization segment")
    local init_seg = init_seg:init(base)
 
    --allocate and set the command queue which also initializes the nic
@@ -581,26 +637,35 @@ function ConnectX4:new(arg)
 
    --8.2 HCA Driver Start-up
 
+   trace("Write the physical location of the command queues to the init segment.")
    init_seg:cmdq_phy_addr(cmdq.phy)
 
-   --wait until the nic is ready
+   trace("Wait for the 'initializing' field to clear")
    while not init_seg:ready() do
       C.usleep(1000)
    end
 
    init_seg:dump()
 
+   trace("Execute ENABLE_HCA command.")
    cmdq:enable_hca()
 
+   trace("Execute QUERY_ISSI command")
    local issi = cmdq:query_issi()
    cmdq:dump_issi(issi)
 
+   os.exit(0)
+
+   trace("Execute SET_ISSI command")
    cmdq:set_issi(0)
 
+   -- PRM: Execute QUERY_PAGES to understand the HCA need to boot pages.
    local boot_pages = cmdq:query_pages'boot'
    print("query_pages'boot'       ", boot_pages)
    assert(boot_pages > 0)
 
+   -- PRM: Execute MANAGE_PAGES to provide the HCA with all required
+   -- init-pages. This can be done by multiple MANAGE_PAGES commands.
    local bp_ptr, bp_phy = memory.dma_alloc(4096 * boot_pages)
    assert(band(bp_phy, 0xfff) == 0) --the phy address must be 4K-aligned
    cmdq:alloc_pages(bp_phy, boot_pages)
@@ -610,6 +675,7 @@ function ConnectX4:new(arg)
    for k,v in pairs(t) do
       print('', k, v)
    end
+
    --[[
    cmdq:set_hca_cap()
    cmdq:query_pages()
@@ -634,15 +700,19 @@ function ConnectX4:new(arg)
    return self
 end
 
+function trace (...)
+   print("TRACE", ...)
+end
+
 function selftest()
    io.stdout:setvbuf'no'
 
    local pcidev1 = lib.getenv("SNABB_PCI_CONNECTX40") or lib.getenv("SNABB_PCI0")
    local pcidev2 = lib.getenv("SNABB_PCI_CONNECTX41") or lib.getenv("SNABB_PCI1")
    if not pcidev1
-      or pci.device_info(pcidev1).driver ~= 'apps.mellanox.connectx4'
+--      or pci.device_info(pcidev1).driver ~= 'apps.mellanox.connectx4'
       or not pcidev2
-      or pci.device_info(pcidev2).driver ~= 'apps.mellanox.connectx4'
+--      or pci.device_info(pcidev2).driver ~= 'apps.mellanox.connectx4'
    then
       print("SNABB_PCI_CONNECTX4[0|1]/SNABB_PCI[0|1] not set or not suitable.")
       os.exit(engine.test_skipped_code)
