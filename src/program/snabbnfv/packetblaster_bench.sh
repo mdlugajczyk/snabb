@@ -2,8 +2,10 @@
 
 export SKIPPED_CODE=43
 
-if [ -z "$SNABB_PCI_INTEL0" ]; then echo "Need SNABB_PCI_INTEL0"; exit $SKIPPED_CODE; fi
-if [ -z "$SNABB_PCI_INTEL1" ]; then echo "Need SNABB_PCI_INTEL1"; exit $SKIPPED_CODE; fi
+if [ -z "$SNABB_PCI_INTEL0" -o -z "$SNABB_PCI_INTEL1" ]; then
+    export SNABB_PCI_INTEL0=soft
+    export SNABB_PCI_INTEL1=soft
+fi
 
 if [ -z "$SNABB_TELNET0" ]; then
     export SNABB_TELNET0=5000
