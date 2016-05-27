@@ -2,7 +2,9 @@
 
 SKIPPED_CODE=43
 
-if [ -z "$SNABB_PCI0" ]; then echo "Need SNABB_PCI0"; exit $SKIPPED_CODE; fi
+if [ -z "$SNABB_PCI0" ]; then
+    export SNABB_PCI0=soft
+fi
 if [ -z "$SNABB_TELNET0" ]; then
     export SNABB_TELNET0=5000
     echo "Defaulting to SNABB_TELNET0=$SNABB_TELNET0"
@@ -301,7 +303,11 @@ function crypto_tests {
 # Usage: iperf_bench [<mode>]
 # Run iperf benchmark. If <mode> is "jumbo", jumboframes will be enabled.
 function iperf_bench {
-    load_config program/snabbnfv/test_fixtures/nfvconfig/test_functions/same_vlan.ports    
+    if [ "$2" = "crypto" ]; then
+        load_config program/snabbnfv/test_fixtures/nfvconfig/test_functions/crypto.ports
+    else
+        load_config program/snabbnfv/test_fixtures/nfvconfig/test_functions/same_vlan.ports
+    fi
 
     if [ "$1" = "jumbo" ]; then
         test_jumboping $SNABB_TELNET0 $SNABB_TELNET1 "$(ip 1)%eth0" \
@@ -334,7 +340,7 @@ start_test_env
 # Decide which mode to run (`test', `bench' or `fuzz').
 case $1 in
     bench)
-        iperf_bench "$2"
+        iperf_bench "$2" "$3"
         ;;
     fuzz)
         fuzz_tests "$2"
