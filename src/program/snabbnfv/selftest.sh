@@ -288,6 +288,16 @@ function filter_tests {
     assert FILTER $?
 }
 
+function crypto_tests {
+    load_config program/snabbnfv/test_fixtures/nfvconfig/test_functions/crypto.ports
+
+    test_ping $SNABB_TELNET0 "$(ip 1)%eth0"
+    test_iperf $SNABB_TELNET0 $SNABB_TELNET1 "$(ip 1)%eth0"
+    test_jumboping $SNABB_TELNET0 $SNABB_TELNET1 "$(ip 1)%eth0"
+    # Repeat iperf test now that jumbo frames are enabled
+    test_iperf $SNABB_TELNET0 $SNABB_TELNET1 "$(ip 1)%eth0"
+}
+
 # Usage: iperf_bench [<mode>]
 # Run iperf benchmark. If <mode> is "jumbo", jumboframes will be enabled.
 function iperf_bench {
@@ -334,6 +344,7 @@ case $1 in
         rate_limited_tests
         tunnel_tests
         filter_tests
+        crypto_tests
 esac
 
 exit 0
