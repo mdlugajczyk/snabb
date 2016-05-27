@@ -107,8 +107,17 @@ function bench (pciaddr, confpath, sockpath, npackets)
    if pciaddr then
       nic = (nfvconfig.port_name(ports[1])).."_NIC"
    else
+      local sizes, sizes_arg = nil, os.getenv("SNABB_PACKET_SIZES")
+      if sizes_arg then
+         sizes = {}
+         for size in string.gmatch(sizes_arg, "%d+") do
+            sizes[#sizes+1] = tonumber(size)
+         end
+      end
+      local src = os.getenv("SNABB_PACKET_SRC")
+      local dst = os.getenv("SNABB_PACKET_DST")
       nic = "BenchSink"
-      bench = { src="52:54:00:00:00:02", dst="52:54:00:00:00:01", sizes = {60}}
+      bench = {src=src, dst=dst, sizes=sizes}
    end
    engine.log = true
    engine.Hz = false
