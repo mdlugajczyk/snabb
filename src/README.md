@@ -337,6 +337,12 @@ Returns the payload length of *packet*.
 
 Returns an exact copy of *packet*.
 
+— Function **packet.resize** *packet*, *length*
+
+Sets the payload length of *packet*, truncating or extending its payload. In
+the latter case the contents of the extended area at the end of the payload are
+filled with zeros.
+
 — Function **packet.append** *packet*, *pointer*, *length*
 
 Appends *length* bytes starting at *pointer* to the end of *packet*. An
@@ -543,10 +549,18 @@ Returns a table that acts as a bounds checked wrapper around a C array of
 ctype and the caller must ensure that the allocated memory region at
 *base*/*offset* is at least `sizeof(type)*size` bytes long.
 
-— Function **lib.timer** *s*
+— Function **lib.timer** *duration*, *mode*, *timefun*
 
-Returns a function that accepts no parameters and acts as a predicate to
-test if *ns* nanoseconds have elapsed.
+Returns a closure that will return `false` until *duration* has elapsed. If
+*mode* is `'repeating'` the timer will reset itself after returning `true`,
+thus implementing an interval timer. *Timefun* is used to get a monotonic time.
+*Timefun* defaults to `C.get_time_ns`.
+
+The “deadline” for a given *duration* is computed by adding *duration* to the
+result of calling *timefun*, and is saved in the resulting closure. A
+*duration* has elapsed when its deadline is less than or equal the value
+obtained using *timefun* when calling the closure.
+
 
 — Function **lib.waitfor** *condition*
 

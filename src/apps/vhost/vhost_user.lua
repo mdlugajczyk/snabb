@@ -13,7 +13,9 @@ local lib       = require("core.lib")
 local link      = require("core.link")
 local main      = require("core.main")
 local memory    = require("core.memory")
+local counter   = require("core.counter")
 local pci       = require("lib.hardware.pci")
+local ethernet  = require("lib.protocol.ethernet")
 local net_device= require("lib.virtio.net_device")
 local timer     = require("core.timer")
 local ffi       = require("ffi")
@@ -44,7 +46,9 @@ function VhostUser:new (args)
       )
    }
    self = setmetatable(o, {__index = VhostUser})
-   self.dev = net_device.VirtioNetDevice:new(self, args.disable_mrg_rxbuf)
+   self.dev = net_device.VirtioNetDevice:new(self,
+                                             args.disable_mrg_rxbuf,
+                                             args.disable_indirect_desc)
    if args.is_server then
       self.listen_socket = C.vhost_user_listen(self.socket_path)
       assert(self.listen_socket >= 0)
@@ -52,6 +56,15 @@ function VhostUser:new (args)
    else
       self.qemu_connect = self.client_connect
    end
+   -- initialize counters
+   self.counters = {}
+   for _, name in ipairs({'type', 'discontinuity-time',
+                          'in-octets', 'in-unicast', 'in-multicast', 'in-discards',
+                          'out-octets', 'out-unicast', 'out-multicast'}) do
+      self.counters[name] = counter.open(name)
+   end
+   counter.set(self.counters['type'], 0x1001) -- Virtual interface
+   counter.set(self.counters['discontinuity-time'], C.get_unix_time())
    return self
 end
 
@@ -68,6 +81,9 @@ function VhostUser:stop()
    self:free_mem_table()
 
    if self.link_down_proc then self.link_down_proc() end
+
+   -- delete counters
+   for name, _ in pairs(self.counters) do counter.delete(name) end
 end
 
 function VhostUser:pull ()
@@ -84,6 +100,24 @@ function VhostUser:push ()
    if self.vhost_ready then
       self.dev:poll_vring_transmit()
    end
+end
+
+function VhostUser:tx_callback (p)
+   counter.add(self.counters['out-octets'], packet.length(p))
+   local mcast = ethernet:n_mcast(packet.data(p))
+   counter.add(self.counters['out-multicast'], mcast)
+   counter.add(self.counters['out-unicast'], 1 - mcast)
+end
+
+function VhostUser:rx_callback (p)
+   counter.add(self.counters['in-octets'], packet.length(p))
+   local mcast = ethernet:n_mcast(packet.data(p))
+   counter.add(self.counters['in-multicast'], mcast)
+   counter.add(self.counters['in-unicast'], 1 - mcast)
+end
+
+function VhostUser:rxdrop_callback (p)
+   counter.add(self.counters['in-discards'])
 end
 
 -- Try to connect to QEMU.
