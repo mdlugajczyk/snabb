@@ -90,7 +90,7 @@ function Intel82599:pull ()
    local l = self.output.tx
    if l == nil then return end
    self.dev:sync_receive()
-   for i=1,128 do
+   for i=1,80 do
       if full(l) or not self.dev:can_receive() then break end
       transmit(l, self.dev:receive())
    end
