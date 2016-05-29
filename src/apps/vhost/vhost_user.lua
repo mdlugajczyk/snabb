@@ -211,6 +211,8 @@ function VhostUser:set_features (msg)
 end
 
 function VhostUser:update_features (features)
+   if true then return features end
+
    local stat = syscall.stat(self.socket_path)
    local mtime = ("%d.%d"):format(tonumber(stat.st_mtime),
                                   tonumber(stat.st_mtime_nsec))
