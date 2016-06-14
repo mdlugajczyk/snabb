@@ -228,6 +228,9 @@ local QUERY_ISSI         = 0x10A
 local CREATE_EQ          = 0x301
 local SET_ISSI           = 0x10B
 local SET_DRIVER_VERSION = 0x10D
+local ALLOC_TRANSPORT_DOMAIN = 0x816
+local CREATE_TIS         = 0x912
+local CREATE_SQ          = 0x904
 
 -- bytewise xor function used for signature calcuation.
 local function xor8 (ptr, len)
@@ -820,6 +823,24 @@ function cmdq:query_nic_vport_context()
             permanent_address = mac_hex }
 end
 
+-- Allocate Transport Domain
+function cmdq:alloc_transport_domain()
+   self:prepare("ALLOC_TRANSPORT_DOMAIN", 0x0c, 0x0c)
+   self:setinbits(0x00, 31, 16, ALLOC_TRANSPORT_DOMAIN)
+   self:post(0x0C, 0x0C)
+   return self:getoutbits(0x08, 23, 0)
+end
+
+-- Create Transmit Interface Send
+function cmdq:create_tis(prio, transport_domain)
+   self:prepare("CREATE_TIS", 0x20 + 0x9C, 0x0C)
+   self:setinbits(0x00, 31, 16, CREATE_TIS)
+   self:setinbits(0x20 + 0x00, 19, 16, prio)
+   self:setinbits(0x20 + 0x24, 23,  0, transport_domain)
+   self:post(0x20 + 0x9C, 0x0C)
+   return self:getoutbits(0x08, 23, 0)
+end
+
 function cmdq:init_hca()
    self:prepare("INIT_HCA", 0x0c, 0x0c)
    self:setinbits(0x00, 31, 16, INIT_HCA)
@@ -910,6 +931,11 @@ function ConnectX4:new(arg)
    for k,v in pairs(vport_ctx) do
       print(k,v)
    end
+
+   local tdomain = cmdq:alloc_transport_domain()
+   print("transport domain = " .. tdomain)
+   local tis = cmdq:create_tis(0, tdomain)
+   print("tis              = " .. tis)
 
    --[[
    cmdq:set_hca_cap()
