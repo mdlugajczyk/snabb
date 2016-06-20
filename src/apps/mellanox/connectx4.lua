@@ -230,6 +230,7 @@ local SET_ISSI           = 0x10B
 local SET_DRIVER_VERSION = 0x10D
 local ALLOC_TRANSPORT_DOMAIN = 0x816
 local CREATE_TIS         = 0x912
+local CREATE_CQ          = 0x400
 local CREATE_SQ          = 0x904
 
 -- bytewise xor function used for signature calcuation.
@@ -572,7 +573,8 @@ function cmdq:create_eq(numpages)
    self:setinbits(0x10 + 0x28, 23, 0, consumer_counter)
    self:setinbits(0x10 + 0x2C, 23, 0, producer_counter)
    -- Set event bitmask
-   local events = bits{PageRequest=0x0A}
+   local events = bits{CE=0x0, LQWE=0x13, CQERR=0x04, IntErr=0x08,
+                       PoStCh=0x09, CoInCo=0x0A, PageRequest=0x0B}
    self:setinbits(0x10 + 0x5C, 31, 0, events)
    -- Allocate pages in contiguous physical memory
    local ptr, phy = memory.dma_alloc(4096 * numpages, 4096)
@@ -823,6 +825,8 @@ function cmdq:query_nic_vport_context()
             permanent_address = mac_hex }
 end
 
+-- Allocate Receive Domain
+
 -- Allocate Transport Domain
 function cmdq:alloc_transport_domain()
    self:prepare("ALLOC_TRANSPORT_DOMAIN", 0x0c, 0x0c)
@@ -831,6 +835,20 @@ function cmdq:alloc_transport_domain()
    return self:getoutbits(0x08, 23, 0)
 end
 
+function cmdq:create_tir(rqn, transport_domain)
+   self:prepare("CREATE_TIR", 0x10C, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x900)
+   -- TIR Context
+   self:setinbits(0x20 + 0x04, 31, 28, 0) -- direct
+   -- (LRO fields reserved because not used)
+   self:setinbits(0x20 + 0x1C, 23, 0, rqn)
+   self:setinbits(0x20 + 0x24,
+                  31, 28, 0,    -- no hashing
+                  23, 0, transport_domain)
+   self:post(0x10C, 0x0C)
+   return getoutbits(0x08, 23, 0)
+end
+   
 -- Create Transmit Interface Send
 function cmdq:create_tis(prio, transport_domain)
    self:prepare("CREATE_TIS", 0x20 + 0x9C, 0x0C)
@@ -841,10 +859,127 @@ function cmdq:create_tis(prio, transport_domain)
    return self:getoutbits(0x08, 23, 0)
 end
 
+function cmdq:alloc_uar()
+   self:prepare("ALLOC_UAR", 0x0C, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x802)
+   self:post(0x0C, 0x0C)
+   return self:getoutbits(0x08, 23, 0)
+end
+
+function cmdq:alloc_pd()
+   self:prepare("ALLOC_PD", 0x0C, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x800)
+   self:post(0x0C, 0x0C)
+   return self:getoutbits(0x08, 23, 0)
+end
+
+function cmdq:create_cq(phy, uar_page, eq, db_phy)
+   self:prepare("CREATE_CQ", 0x114, 0x0C)
+   self:setinbits(0x00, 31, 16, CREATE_CQ)
+   -- PAS (physical address)
+   self:setinbits(0x110, 31, 0, ptrbits(phy, 63, 32))
+   self:setinbits(0x114, 31, 0, ptrbits(phy, 31, 0))
+   -- CQ Context
+   self:setinbits(0x10 + 0,
+                  31, 28, 0, -- status
+                  23, 21, 0, -- cqe_sz (64 bytes)
+                  20, 20, 0, -- cc (collapse events)
+                  18, 18, 0, -- scqe_break_moderation_en
+                  17, 17, 0, -- oi: override ignore
+                  16, 15, 0, -- cq_period_mode
+                  14, 14, 0, -- cq_compression_en
+                  13, 12, 0, -- mini_cqe_res_format
+                  11, 8,  0) -- state (reserved on create)
+   -- (page_offset is 0)
+   self:setinbits(0x10 + 0x0C,
+                  28, 24, 10, -- log_cq_size (10 matches mlx5 trace)
+                  23, 0, uar_page) -- uar_page
+   -- (cq_period and cq_max_count are 0)
+   self:setinbits(0x10 + 0x14, 7, 0, eq)
+   self:setinbits(0x10 + 0x18, 28, 24, 4) -- log_page_size (4 matches mlx5 trace)
+   self:setinbits(0x10 + 0x38, 31, 0, ptrbits(db_phy, 63, 32))
+   self:setinbits(0x10 + 0x3C, 31, 0, ptrbits(db_phy, 31, 0))
+   self:post(0x114, 0x0C)
+   return self:getbits(0x08, 23, 0)
+end
+
+function cmdq:create_sq(tis, cqn, user_index, db_phy)
+   self:prepare("CREATE_SQ", 0x10 + 0x20 + 0x30 + 0xC4, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x904) -- CREATE_SQ
+   -- Send queue
+   self:setinbits(0x20 + 0x00,
+                  31, 31, 1,    -- rlkey
+                  29, 29, 0,    -- fre
+                  28, 28, 0,    -- flush_in_error_en
+                  26, 24, 0,    -- min_wqe_inline_mode
+                  23, 20, 0)    -- state = RST
+   self:setinbits(0x20 + 0x04, 23, 0, user_index)
+   self:setinbits(0x20 + 0x08, 23, 0, cqn)
+   self:setinbits(0x20 + 0x20, 31, 16, 1) -- tis_lst_sz
+   self:setinbits(0x20 + 0x2C, 23, 0, tis)
+   -- Work queue
+   self:setinbits(0x20 + 0x30 + 0x00,
+                  31, 28, 1,     -- wq_type = cyclic
+                  27, 27, 0,     -- signature disable
+                  26, 25, 0,     -- end_padding_mode
+                  20, 16, 0,     -- page_offset XXX value?
+                  15, 0,  0)     -- limit water mark = disabled
+   self:setinbits(0x20 + 0x30 + 0x08, 23, 0, 0) -- pd
+   self:setinbits(0x20 + 0x30 + 0x0C, 23, 0, 0) -- uar_page
+   self:setinbits(0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
+   self:setinbits(0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
+   self:setinbits(0x20 + 0x30 + 0x20,
+                  -- log_wq_stride = 0 means 64-byte stride:
+                  --   one (2^0) * work queue basic block size (64 bytes)
+                  19, 16, 0,     -- log_wq_stride
+                  12, 8,  0,     -- log_wq_pg_sz = 0 (4KB)
+                  4,  0,  64)     -- log_wq_sz
+   self:post(0x10 + 0x20 + 0x30 + 0xC4, 0x0C)
+   return self:getoutbits(0x08, 23, 0)
+end
+
 function cmdq:init_hca()
    self:prepare("INIT_HCA", 0x0c, 0x0c)
    self:setinbits(0x00, 31, 16, INIT_HCA)
    self:post(0x0C, 0x0C)
+end
+
+-- Create a "memory key" describing the physical address layout.
+-- XXX We are always using physical addresses. I am not sure if an
+--     mkey is really required or whether the "reserved lkey" value
+--     can be used to bypass this whole mechanism. Implementing this
+--     command now to see if it helps resolve a surprising error on
+--     CREATE_CQ that may or may not be related.
+function cmdq:create_mkey(pd)
+   self:prepare("CREATE_MKEY", 0x110, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x200)
+   -- MKey Context
+   self:setinbits(0x10 + 0x00,
+                  30, 30, 0, -- free
+                  15, 15, 1, -- umr_en
+                  13, 13, 1, -- rw
+                  12, 12, 1, -- rr
+                  11, 11, 1, -- lw
+                  10, 10, 1, -- lr
+                  9, 8, 0)   -- access mode (physical)
+   self:setinbits(0x10 + 0x04,
+                  31, 8, 0xFFFFFF, -- qpn
+                  7, 0, 0)   -- mkey (variant part)
+   self:setinbits(0x10 + 0x0C,
+                  31, 31, 1, -- length64
+                  23, 0, pd)
+   -- Start address = 0
+   -- (Remaining fields are reserved when using physical addresses)
+   self:post(0x110, 0x0C)
+   return self:getoutbits(0x08, 23, 0)
+end
+
+-- Return reserved lkey.
+function cmdq:query_special_contexts()
+   self:prepare("QUERY_SPECIAL_CONTEXTS", 0x0C, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x203)
+   self:post(0x0C, 0x0C)
+   return self:getoutbits(0x0C, 31, 0)
 end
 
 function init_seg:dump()
@@ -924,6 +1059,7 @@ function ConnectX4:new(arg)
 
    cmdq:init_hca()
 
+
    local eq = cmdq:create_eq(1)
    print("eq               = " .. eq)
 
@@ -934,8 +1070,30 @@ function ConnectX4:new(arg)
 
    local tdomain = cmdq:alloc_transport_domain()
    print("transport domain = " .. tdomain)
+
    local tis = cmdq:create_tis(0, tdomain)
    print("tis              = " .. tis)
+   debug = true
+
+   local uar = cmdq:alloc_uar()
+   print("uar              = " .. uar)
+
+   local rlkey = cmdq:query_special_contexts()
+   print("reserved lkey    = " .. rlkey)
+   local pd = cmdq:alloc_pd()
+   print("protection dom.  = " .. pd)
+   local mkey = cmdq:create_mkey(pd)
+   print("mkey             = " .. mkey)
+
+   local _, db_phy_cq = memory.dma_alloc(16)
+   local _, phy_cq = memory.dma_alloc(4096*16)
+   local cq = cmdq:create_cq(phy_cq, uar, eq, db_phy_cq)
+   local _, db_phy_sq = memory.dma_alloc(16)
+   local sq = cmdq:create_sq(tis, 0, 0, db_phy_sq)
+   prnt("sq                = " .. sq)
+
+   local tir = cmdq:create_tir(0, tdomain)
+   print("tir              = " .. tir)
 
    --[[
    cmdq:set_hca_cap()
