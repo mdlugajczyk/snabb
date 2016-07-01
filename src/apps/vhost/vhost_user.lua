@@ -29,6 +29,12 @@ assert(ffi.sizeof("struct vhost_user_msg") == 276, "ABI error")
 
 VhostUser = {}
 
+local provided_counters = {
+   'type', 'dtime',
+   'rxbytes', 'rxpackets', 'rxmcast', 'rxdrop',
+   'txbytes', 'txpackets', 'txmcast'
+}
+
 function VhostUser:new (args)
    local o = { state = 'init',
       dev = nil,
@@ -58,13 +64,11 @@ function VhostUser:new (args)
    end
    -- initialize counters
    self.counters = {}
-   for _, name in ipairs({'type', 'discontinuity-time',
-                          'in-octets', 'in-unicast', 'in-multicast', 'in-discards',
-                          'out-octets', 'out-unicast', 'out-multicast'}) do
+   for _, name in ipairs(provided_counters) do
       self.counters[name] = counter.open(name)
    end
-   counter.set(self.counters['type'], 0x1001) -- Virtual interface
-   counter.set(self.counters['discontinuity-time'], C.get_unix_time())
+   counter.set(self.counters.type, 0x1001) -- Virtual interface
+   counter.set(self.counters.dtime, C.get_unix_time())
    return self
 end
 
@@ -103,21 +107,19 @@ function VhostUser:push ()
 end
 
 function VhostUser:tx_callback (p)
-   counter.add(self.counters['out-octets'], packet.length(p))
-   local mcast = ethernet:n_mcast(packet.data(p))
-   counter.add(self.counters['out-multicast'], mcast)
-   counter.add(self.counters['out-unicast'], 1 - mcast)
+   counter.add(self.counters.txbytes, packet.length(p))
+   counter.add(self.counters.txpackets)
+   counter.add(self.counters.txmcast, ethernet:n_mcast(packet.data(p)))
 end
 
 function VhostUser:rx_callback (p)
-   counter.add(self.counters['in-octets'], packet.length(p))
-   local mcast = ethernet:n_mcast(packet.data(p))
-   counter.add(self.counters['in-multicast'], mcast)
-   counter.add(self.counters['in-unicast'], 1 - mcast)
+   counter.add(self.counters.rxbytes, packet.length(p))
+   counter.add(self.counters.rxpackets)
+   counter.add(self.counters.rxmcast, ethernet:n_mcast(packet.data(p)))
 end
 
 function VhostUser:rxdrop_callback (p)
-   counter.add(self.counters['in-discards'])
+   counter.add(self.counters.rxdrop)
 end
 
 -- Try to connect to QEMU.
@@ -210,6 +212,38 @@ function VhostUser:set_features (msg)
    self.dev:set_features(features)
 end
 
+-- Feature cache: A kludge to be compatible with a "QEMU reconnect" patch.
+--
+-- QEMU upstream (circa 2015) does not support the vhost-user device
+-- (Snabb) reconnecting to QEMU. That is unfortunate because being
+-- able to reconnect after a restart of either the Snabb process or
+-- simply a vhost-user app is very practical.
+--
+-- Reconnect support can however be enabled in QEMU with a small patch
+-- [1]. Caveat: Feature negotiation does not work reliably on the new
+-- connections and may provide an invalid feature list. Workaround:
+-- Cache the most recently negotiated features for each vhost-user
+-- socket and reuse those when available.
+--
+-- This is far from perfect but it is better than nothing.
+-- Reconnecting to QEMU VMs is very practical and enables faster
+-- development, restart of the Snabb process for recovery or upgrade,
+-- and stop/start of vhost-user app instances e.g. due to
+-- configuration changes.
+--
+-- QEMU upstream seem to be determined to solve the reconnect problem
+-- by requiring changes to the guest drivers so that the device could
+-- request a reset. However, this has the undesirable properties that
+-- it will not be transparent to the guest and nor will it work on
+-- existing guest drivers.
+--
+-- And so for now we have this cache for people who want to patch
+-- reconnect support into their QEMU...
+--
+-- 1: QEMU patch:
+--   https://github.com/SnabbCo/qemu/commit/f393aea2301734647fdf470724433f44702e3fb9.patch
+
+-- Consider using virtio-net feature cache to override negotiated features.
 function VhostUser:update_features (features)
    if true then return features end
 
@@ -218,7 +252,11 @@ function VhostUser:update_features (features)
                                   tonumber(stat.st_mtime_nsec))
    local cachepath = "/tmp/vhost_features_"..string.gsub(self.socket_path, "/", "__")
    local f = io.open(cachepath, 'r')
-   if f then
+   -- Use cached features when:
+   --   Negotiating features for the first time for this app instance
+   --   Cache is populated
+   --   QEMU vhost-user socket file has same timestamp as cache
+   if not self.have_negotiated_features and f then
       local file_features, file_mtime = f:read('*a'):match("features:(.*) mtime:(.*)\n")
       f:close()
       if file_mtime == mtime then
@@ -229,6 +267,12 @@ function VhostUser:update_features (features)
          print(("vhost_user: Skipped old feature cache in %s"):format(cachepath))
       end
    end
+   -- Features are now negotiated for this app instance. If they are
+   -- negotiated again it will presumably be due to guest driver
+   -- restart and in that case we should trust the new features rather
+   -- than overriding them with the cache.
+   self.have_negotiated_features = true
+   -- Cache features after they are negotiated
    f = io.open(cachepath, 'w')
    if f then
       print(("vhost_user: Caching features (0x%s) in %s"):format(

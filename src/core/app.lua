@@ -11,6 +11,7 @@ local shm     = require("core.shm")
 local histogram = require('core.histogram')
 local counter   = require("core.counter")
 local zone      = require("jit.zone")
+local jit       = require("jit")
 local ffi       = require("ffi")
 local C         = ffi.C
 require("core.packet_h")
@@ -68,20 +69,24 @@ end
 
 -- Run app:methodname() in protected mode (pcall). If it throws an
 -- error app will be marked as dead and restarted eventually.
-local function with_restart (app, method)
+function with_restart (app, method)
    local oldshm = shm.path
    shm.path = app.shmpath
+   local status, result
    if use_restart then
       -- Run fn in protected mode using pcall.
-      local status, err = pcall(method, app)
+      status, result = pcall(method, app)
 
       -- If pcall caught an error mark app as "dead" (record time and cause
       -- of death).
-      if not status then app.dead = { error = err, time = now() } end
+      if not status then
+         app.dead = { error = result, time = now() }
+      end
    else
-      method(app)
+      status, result = true, method(app)
    end
    shm.path = oldshm
+   return status, result
 end
 
 -- Restart dead apps.
@@ -152,8 +157,8 @@ end
 -- Update the active app network by applying the necessary actions.
 function apply_config_actions (actions, conf)
    -- The purpose of this function is to populate these tables:
-   local new_app_table,  new_app_array  = {}, {}, {}
-   local new_link_table, new_link_array = {}, {}, {}
+   local new_app_table,  new_app_array  = {}, {}
+   local new_link_table, new_link_array = {}, {}
    -- Temporary name->index table for use in link renumbering
    local app_name_to_index = {}
    -- Table of functions that execute config actions
@@ -201,7 +206,10 @@ function apply_config_actions (actions, conf)
       if app_table[name].reconfig then
          local arg = conf.apps[name].arg
          local app = app_table[name]
+         local shmorig = shm.path
+         shm.path = app.shmpath
          app:reconfig(arg)
+         shm.path = shmorig
          new_app_table[name] = app
          table.insert(new_app_array, app)
          app_name_to_index[name] = #new_app_array
@@ -239,12 +247,12 @@ function apply_config_actions (actions, conf)
    for linkspec, r in pairs(link_table) do
       if not new_link_table[linkspec] then link.free(r, linkspec) end
    end
-   -- commit changes
+   -- Commit changes.
    app_table, link_table = new_app_table, new_link_table
    app_array, link_array = new_app_array, new_link_array
-   -- Run post_config methods.
+   -- Trigger link event for each app.
    for _, app in ipairs(app_array) do
-      if app.post_config then with_restart(app, app.post_config) end
+      if app.link then app:link() end
    end
 end
 

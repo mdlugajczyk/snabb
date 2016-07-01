@@ -79,10 +79,14 @@ local function check_ip_address(ip, desc)
 end
 
 function nd_light:new (arg)
-   local conf = arg and config.parse_app_arg(arg) or {}
+   local arg = arg and config.parse_app_arg(arg) or {}
+   --copy the args to avoid changing the arg table so that it stays reusable.
+   local conf = {}
+   for k,v in pairs(arg) do
+      conf[k] = v
+   end
    local o = nd_light:superClass().new(self)
    conf.delay = conf.delay or 1000
-   conf.retrans = conf.retrans
    assert(conf.local_mac, "nd_light: missing local MAC address")
    if type(conf.local_mac) == "string" and string.len(conf.local_mac) ~= 6 then
       conf.local_mac = ethernet:pton(conf.local_mac)
@@ -252,7 +256,7 @@ local function na (self, dgram, eth, ipv6, icmp)
 end
 
 local function from_south (self, p)
-   if not self._filter:match(packet.data(p[0]), packet.length(p[0])) then
+   if not self._filter:match(p[0].data, p[0].length) then
       return false
    end
    local dgram = datagram:new(p[0], ethernet)
@@ -310,8 +314,8 @@ function nd_light:push ()
       else
          local p = cache.p
          p[0] = link.receive(l_in)
-         if packet.length(p[0]) >= self._eth_header:sizeof() then
-            self._eth_header:copy(packet.data(p[0]))
+         if p[0].length >= self._eth_header:sizeof() then
+            self._eth_header:copy(p[0].data)
             link.transmit(l_out, p[0])
          else packet.free(p[0]) end
       end
