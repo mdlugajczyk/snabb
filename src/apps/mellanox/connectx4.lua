@@ -79,7 +79,7 @@ local cast = ffi.cast
 local band, bor, shl, shr, bswap, bnot =
    bit.band, bit.bor, bit.lshift, bit.rshift, bit.bswap, bit.bnot
 
-local debug = false
+local debug = true
 
 ConnectX4 = {}
 ConnectX4.__index = ConnectX4
@@ -424,7 +424,10 @@ function cmdq:post(last_in_ofs, last_out_ofs)
 
    --poll for command completion
    while self:getbits(0x3C, 0, 0) == 1 do
-      C.usleep(100000)
+      if self.init_seg:getbits(0x1010, 31, 24) ~= 0 then
+         error("HCA health problem: " .. bit.tohex(self.init_seg:getbits(0x1010, 31, 0)))
+      end
+      C.usleep(10000)
    end
 
    if debug then
@@ -533,7 +536,7 @@ function cmdq:alloc_pages(num_pages)
 end
 
 -- Create Event Queue (EQ)
-function cmdq:create_eq(numpages)
+function cmdq:create_eq(uar, numpages)
    self:prepare("CREATE_EQ", 0x10C + numpages*8, 0x0C)
    self:setinbits(0x00, 31, 16, CREATE_EQ)
    -- Setup Event Queue Context:
@@ -583,7 +586,87 @@ function cmdq:create_eq(numpages)
       self:setinbits(0x114 + i*8, 31, 0, ptrbits(phy + i * 4096, 31, 0))
    end
    self:post(0x10C + numpages*8, 0x0C)
-   return self:getoutbits(0x08, 7, 0)
+   local eqn = self:getoutbits(0x08, 7, 0)
+   return eq:new(eqn, ptr, 2^log_eq_size)
+end
+
+-- EQ (Event Queue) object
+
+-- Event Queue Entry (EQE)
+local eqe_t = ffi.typeof[[
+  struct {
+    uint16_t event_type;
+    uint16_t event_sub_type;
+    uint32_t event_data;
+    uint16_t pad;
+    uint8_t signature;
+    uint8_t owner;
+  }
+]]
+
+uar = {}
+uar.__index = uar
+
+local uar_t = ffi.typeof[[
+  struct {
+    uint8_t pad0[0x20];
+    uint64_t cq;
+    uint8_t pad1[0x1C];
+    uint32_t eq_arm;
+    uint8_t pad2[0x04];
+    uint32_t eq;
+    uint8_t pad3[0x7B8];
+    uint32_t db_blueflame_buffer0_even;
+    uint32_t db_blueflame_buffer0_odd;
+    uint32_t db_blueflame_buffer1_even;
+    uint32_t db_blueflame_buffer1_odd;
+  }
+]]
+
+function uar:new(uar_number, base_ptr)
+   local ptr = ffi.cast("uint8_t*", base_ptr) + uar_number * 4096
+   return setmetatable({uar_n = uar_number,
+                        uar = ffi.cast(uar_t, ptr)})
+end
+
+function uar:ring_eq_doorbell(eqn, consumer_index)
+   local n = bswap(shl(eqn, 24) + consumer_index)
+   
+   
+end
+
+function uar:ring_cq_doorbell()
+end
+
+eq = {}
+eq.__index = eq
+
+function eq:new(eqn, pointer, nentries)
+   local ring = ffi.cast(ffi.typeof("$*", eqe_t), pointer)
+   for i = 0, nentries-1 do
+      ring[i].owner = 1
+   end
+   return setmetatable({eqn = eqn,
+                        ring = ring,
+                        index = 0,
+                        n = nentries},
+      self)
+end
+
+function eq:poll()
+   print("Polling EQ")
+   local eqe = self.ring[self.index]
+   while eqe.owner == 0 and eqe.event_type ~= 0xFF do
+      self.index = self.index + 1
+      eqe = self.ring[self.index % self.n]
+      self:event(eqe)
+   end
+   print("done polling EQ")
+end
+
+function eq:event()
+   print(("Got event %s.%s"):format(eqe.event_type, eqe.event_sub_type))
+   error("Event handling not yet implemented")
 end
 
 local what_codes = {
@@ -794,7 +877,7 @@ end
 
 function cmdq:query_vport_state()
    self:prepare("QUERY_VPORT_STATE", 0x0c, 0x0c)
-   self:setinbits(0x00, 31, 16, QUERY_VPORT_STATE)
+   self:setinbits(0x00, 31, 16, 0x750)
    self:post(0x0C, 0x0C)
    return { admin_state = self:getoutbits(0x0C, 7, 4),
             oper_state  = self:getoutbits(0x0C, 3, 0) }
@@ -846,7 +929,7 @@ function cmdq:create_tir(rqn, transport_domain)
                   31, 28, 0,    -- no hashing
                   23, 0, transport_domain)
    self:post(0x10C, 0x0C)
-   return getoutbits(0x08, 23, 0)
+   return self:getoutbits(0x08, 23, 0)
 end
    
 -- Create Transmit Interface Send
@@ -873,7 +956,11 @@ function cmdq:alloc_pd()
    return self:getoutbits(0x08, 23, 0)
 end
 
-function cmdq:create_cq(phy, uar_page, eq, db_phy)
+function cmdq:create_cq(entries, uar_page, eq, db_phy)
+   local ptr, phy = memory.dma_alloc(entries * 64, 4096)
+   -- Fill with ones.
+   -- Note: This sets hardware ownership bit for first use.
+   --ffi.fill(ptr, entries * 64, 0xFF)
    self:prepare("CREATE_CQ", 0x114, 0x0C)
    self:setinbits(0x00, 31, 16, CREATE_CQ)
    -- PAS (physical address)
@@ -900,18 +987,61 @@ function cmdq:create_cq(phy, uar_page, eq, db_phy)
    self:setinbits(0x10 + 0x38, 31, 0, ptrbits(db_phy, 63, 32))
    self:setinbits(0x10 + 0x3C, 31, 0, ptrbits(db_phy, 31, 0))
    self:post(0x114, 0x0C)
-   return self:getbits(0x08, 23, 0)
+   return self:getoutbits(0x08, 23, 0), ptr
 end
 
-function cmdq:create_sq(tis, cqn, user_index, db_phy)
-   self:prepare("CREATE_SQ", 0x10 + 0x20 + 0x30 + 0xC4, 0x0C)
+function cmdq:create_rq(cqn, user_index, uar, pd, db_phy, rqmem)
+   local rqphy = memory.virtual_to_physical(rqmem)
+   self:prepare("CREATE_RQ", 0x20 + 0x30 + 0xC4, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x908) -- CREATE_RQ
+   -- Receive Queue
+   self:setinbits(0x20 + 0x00,
+                  31, 31, 1, -- rlkey
+                  28, 28, 1, -- vlan_strip_disable
+                  27, 24, 0) -- inlined memory queue
+   self:setinbits(0x20 + 0x04, 23, 0, user_index)
+   self:setinbits(0x20 + 0x08, 23, 0, cqn)
+   -- Work Queue
+   self:setinbits(0x20 + 0x30 + 0x00,
+                  31, 28, 1, -- wq_type = cyclic
+                  27, 27, 0, -- wq_signature = disabled
+                  26, 25, 0, -- no padding
+                  20, 16, 0, -- page_offset = 0
+                  15, 0,  0) -- lwm = 0
+   self:setinbits(0x20 + 0x30 + 0x08, 23, 0, pd)
+   self:setinbits(0x20 + 0x30 + 0x0C, 23, 0, user_index)
+   self:setinbits(0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
+   self:setinbits(0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
+   self:setinbits(0x20 + 0x30 + 0x20,
+                  19, 16, 4,     -- log_wq_stride
+                  12, 8, 4,      -- page size (XXX one big page?)
+                  4, 0, 10)      -- log_wq_size (1024 x 64 byte entries)
+   self:setinbits(0x20 + 0x30 + 0xC0, 63, 32, ptrbits(rqphy, 63, 32))
+   self:setinbits(0x20 + 0x30 + 0xC4, 31, 0,  ptrbits(rqphy, 31, 0))
+   self:post(0x10 + 0x20 + 0x30 + 0xC4, 0x0C)
+   return self:getoutbits(0x08, 23, 0), rqmem
+end
+
+function cmdq:modify_sq(sqn, curr_state, next_state)
+   self:prepare("MODIFY_SQ", 0x20 + 0x30 + 0xC4, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x905)
+   self:setinbits(0x08,
+                  31, 28, curr_state,
+                  23, 0, sqn)
+   self:setinbits(0x20 + 0x00,
+                  23, 20, next_state)
+   self:post(0x20 + 0x30 + 0xC4, 0x0C)
+end
+
+function cmdq:create_sq(tis, cqn, user_index, uar, pd, db_phy, sqmem)
+   self:prepare("CREATE_SQ", 0x20 + 0x30 + 0xC4, 0x0C)
    self:setinbits(0x00, 31, 16, 0x904) -- CREATE_SQ
    -- Send queue
    self:setinbits(0x20 + 0x00,
                   31, 31, 1,    -- rlkey
                   29, 29, 0,    -- fre
                   28, 28, 0,    -- flush_in_error_en
-                  26, 24, 0,    -- min_wqe_inline_mode
+                  26, 24, 1,    -- min_wqe_inline_mode
                   23, 20, 0)    -- state = RST
    self:setinbits(0x20 + 0x04, 23, 0, user_index)
    self:setinbits(0x20 + 0x08, 23, 0, cqn)
@@ -921,21 +1051,97 @@ function cmdq:create_sq(tis, cqn, user_index, db_phy)
    self:setinbits(0x20 + 0x30 + 0x00,
                   31, 28, 1,     -- wq_type = cyclic
                   27, 27, 0,     -- signature disable
-                  26, 25, 0,     -- end_padding_mode
-                  20, 16, 0,     -- page_offset XXX value?
-                  15, 0,  0)     -- limit water mark = disabled
-   self:setinbits(0x20 + 0x30 + 0x08, 23, 0, 0) -- pd
-   self:setinbits(0x20 + 0x30 + 0x0C, 23, 0, 0) -- uar_page
+                  26, 25, 0)     -- end_padding_mode (reserved for SQ)
+   self:setinbits(0x20 + 0x30 + 0x04,
+                  20, 16, 0,     -- page_offset = 0
+                  15, 0,  0)     -- limit water mark (reserved for SQ)
+   self:setinbits(0x20 + 0x30 + 0x08, 23, 0, pd) -- pd
+   self:setinbits(0x20 + 0x30 + 0x0C, 23, 0, uar) -- uar_page (XXX reserved for SQ)
    self:setinbits(0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
    self:setinbits(0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
    self:setinbits(0x20 + 0x30 + 0x20,
                   -- log_wq_stride = 0 means 64-byte stride:
                   --   one (2^0) * work queue basic block size (64 bytes)
-                  19, 16, 0,     -- log_wq_stride
-                  12, 8,  0,     -- log_wq_pg_sz = 0 (4KB)
-                  4,  0,  64)     -- log_wq_sz
+                  19, 16, 6,     -- log_wq_stride
+                  12, 8,  0xF,  -- log_wq_pg_sz = 0xF (max)
+                  4,  0,  6)    -- log_wq_sz (1024 x 64 byte entries)
+   local wqphy = memory.virtual_to_physical(sqmem)
+   --local wq, wqphy = memory.dma_alloc(1024 * 64, 4096)
+   self:setinbits(0x20 + 0x30 + 0xC0, 31, 0, ptrbits(wqphy, 63, 32))
+   self:setinbits(0x20 + 0x30 + 0xC4, 31, 0, ptrbits(wqphy, 31, 0))
    self:post(0x10 + 0x20 + 0x30 + 0xC4, 0x0C)
+   return self:getoutbits(0x08, 23, 0), sqmem
+end
+
+function cmdq:query_sq(sqn)
+   self:prepare("QUERY_SQ", 0x0c, 0x10 + 0x20 + 0x30 + 0xC4)
+   self:setinbits(0x00, 31, 16, 0x907)
+   self:setinbits(0x08, 23, 0, sqn)
+   self:post(0x0C, 0x10 + 0x20 + 0x30 + 0xC4)
+   return {
+      --user_index = self:getoutbits(0x20 + 0x04, 23, 0),
+      --cqn        = self:getoutbits(0x20 + 0x08, 23, 0),
+      hw_counter = self:getoutbits(0x20 + 0x18, 31, 0),
+      sw_counter = self:getoutbits(0x20 + 0x1C, 31, 0),
+   }
+end
+
+local flow_table_types = { receive = 0, send = 1}
+
+function cmdq:create_root_flow_table(table_type)
+   assert(flow_table_types[table_type], "bad table type: "..table_type)
+   self:prepare("CREATE_FLOW_TABLE", 0x3C, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x930)
+   self:setinbits(0x10, 31, 24, flow_table_types[table_type])
+   -- Flow table context
+   self:setinbits(0x18 + 0x00, 27, 24, 0) -- default miss action
+   self:setinbits(0x18 + 0x00, 23, 16, 0) -- level=0 (root)
+   self:setinbits(0x18 + 0x00, 7, 0,   4) -- log_size (reserve some space)
+   self:post(0x3C, 0x0C)
    return self:getoutbits(0x08, 23, 0)
+end
+
+function cmdq:set_flow_table_root(table_id, table_type)
+   assert(flow_table_types[table_type], "bad table type: "..table_type)
+   self:prepare("SET_FLOW_TABLE_ROOT", 0x3C, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x92F)
+   self:setinbits(0x10, 31, 24, flow_table_types[table_type])
+   self:setinbits(0x14, 23, 0, table_id)
+   self:post(0x3C, 0x0C)
+end
+
+function cmdq:create_flow_group_wildcard(table_id, table_type, start_ix, end_ix)
+   assert(flow_table_types[table_type], "bad table type: "..table_type)
+   self:prepare("CREATE_FLOW_GROUP", 0x3FC, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x933)
+   self:setinbits(0x10, 31, 24, flow_table_types[table_type])
+   self:setinbits(0x14, 23, 0, table_id)
+   self:setinbits(0x1C, 31, 0, start_ix)
+   self:setinbits(0x24, 31, 0, end_ix)
+   self:setinbits(0x3C,  7, 0, 0) -- match outer headers
+   -- XXX Have to match something? Let's try ethertype
+   --self:setinbits(0x40 + 0x04, 15, 0, 0xFFFF)
+   --self:setinbits(0x40 + 0x10, 31, 24, 0xFF)
+   self:post(0x3FC, 0x0C)
+end
+
+function cmdq:set_flow_table_entry_simple(table_id, table_type, group_id, flow_index, tir)
+   assert(flow_table_types[table_type], "bad table type: "..table_type)
+   self:prepare("SET_FLOW_TABLE_ENTRY", 0x304, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x936)
+   self:setinbtis(0x04, 15,  0, 0) -- opmode = new entry
+   self:setinbits(0x10, 31, 24, flow_table_types[table_type])
+   self:setinbits(0x14, 23,  0, table_id)
+   self:setinbits(0x20, 31, 0, flow_index)
+   -- Flow context
+   self:setinbits(0x40 + 0x04, 31, 0, group_id)
+   self:setinbits(0x40 + 0x08, 31, 0, 1) -- flow tag value for CQE
+   self:setinbits(0x40 + 0x0C, 15, 0, 5) -- action = FWD_DST|ALLOW
+   self:setinbits(0x40 + 0x10, 23, 0, 1) -- destination list size
+   -- (Match value blank for wildcard)
+   self:setinbits(0x40 + 0x300, 31, 24, 2) -- destination type = TIR
+   self:setinbits(0x40 + 0x300, 23,  0, tir)
+   self:post(0x304, 0x0C)
 end
 
 function cmdq:init_hca()
@@ -1060,11 +1266,18 @@ function ConnectX4:new(arg)
    cmdq:init_hca()
 
 
-   local eq = cmdq:create_eq(1)
-   print("eq               = " .. eq)
+   local eq_uar = cmdq:alloc_uar()
+
+   local eq = cmdq:create_eq(eq_uar, 1)
+   print("eq               = " .. eq.eqn)
 
    local vport_ctx = cmdq:query_nic_vport_context()
    for k,v in pairs(vport_ctx) do
+      print(k,v)
+   end
+
+   local vport_state = cmdq:query_vport_state()
+   for k,v in pairs(vport_state) do
       print(k,v)
    end
 
@@ -1073,7 +1286,6 @@ function ConnectX4:new(arg)
 
    local tis = cmdq:create_tis(0, tdomain)
    print("tis              = " .. tis)
-   debug = true
 
    local uar = cmdq:alloc_uar()
    print("uar              = " .. uar)
@@ -1085,15 +1297,167 @@ function ConnectX4:new(arg)
    local mkey = cmdq:create_mkey(pd)
    print("mkey             = " .. mkey)
 
-   local _, db_phy_cq = memory.dma_alloc(16)
-   local _, phy_cq = memory.dma_alloc(4096*16)
-   local cq = cmdq:create_cq(phy_cq, uar, eq, db_phy_cq)
-   local _, db_phy_sq = memory.dma_alloc(16)
-   local sq = cmdq:create_sq(tis, 0, 0, db_phy_sq)
-   prnt("sq                = " .. sq)
+   eq:poll()
 
-   local tir = cmdq:create_tir(0, tdomain)
-   print("tir              = " .. tir)
+   local db_ptr_cq, db_phy_cq = memory.dma_alloc(16)
+   local cq, cqes = cmdq:create_cq(1024, uar, eq.eqn, db_phy_cq)
+   print("cq               = " .. cq)
+   local db_sq, db_phy_sq = memory.dma_alloc(16)
+   local sqmem = memory.dma_alloc(64*1024, 4096)
+   local rqmem = memory.dma_alloc(64*1024, 4096)
+
+   local sq, wq = cmdq:create_sq(tis, cq, 11, uar, pd, db_phy_sq, sqmem, mkey)
+   cmdq:modify_sq(sq, 0, 1)
+   print("sq               = " .. sq)
+
+   local db_ptr_rcq, db_phy_rcq = memory.dma_alloc(16)
+   local rcq, rcqes = cmdq:create_cq(1024, uar, eq.eqn, db_phy_rcq)
+   local rq, rwq = cmdq:create_rq(rcq, 0, uar, pd, db_phy_sq, rqmem)
+   print("rq               = " .. rq .. "("..bit.tohex(rq)..")")
+
+   local tir = cmdq:create_tir(rq, tdomain)
+
+   debug = true
+   local rx_table_id = cmdq:create_root_flow_table('receive')
+   local tx_table_id = cmdq:create_root_flow_table('send')
+   print("rx_flow_table    = " .. rx_table_id)
+   print("tx_flow_table    = " .. tx_table_id)
+   local group_id = cmdq:create_flow_group_wildcard(rx_table_id, 'receive', 0, 1)
+   cmdq:set_flow_table_entry_simple(rx_table_id, 'receive', group_id, 0, tir)
+   cmdq:set_flow_table_root(rx_table_id, 'receive')
+
+
+   print("Creating send queue entries")
+
+   -- 64B Work Queue Entry (WQE)
+   local wq_db_t = ffi.typeof("struct { uint32_t receive, send; } *")
+   local wqe_t = ffi.typeof([[union {
+                                uint8_t  u8[64];
+                                uint32_t u32[16];
+                                uint64_t u64[8];
+                             } *]])
+   local wqes = ffi.cast(wqe_t, wq)
+   -- Create the send WQEs
+   local nsend = 30
+   for i = 0, nsend-1 do
+      local wqe = wqes[i]
+      local p = packet.allocate()
+      p.length = 60
+      ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
+      ffi.fill(p.data+6, 6, i)  -- smac = packet#
+      --ffi.fill(p.data, 60, 0xFF)
+      -- 16B control segment
+      wqe.u32[0] = bswap(shl(i, 8) + 0x0A)
+      wqe.u32[1] = bswap(shl(sq, 8) + 4)
+      wqe.u32[2] = bswap(shl(2, 2))
+      -- 32B ethernet segment (20 byte inline header)
+      wqe.u32[7] = bswap(shl(20, 16))         -- 20 byte inline header
+      C.full_memory_barrier()
+      ffi.copy(wqe.u8 + 0x1E, p.data, 20) -- inline headers
+      C.full_memory_barrier()
+      -- 16B send data segment (DMA pointer)
+      wqe.u32[12] = bswap(p.length)
+      wqe.u32[13] = bswap(rlkey)
+      --wqe.u32[13] = bswap(mkey)
+      local phy = memory.virtual_to_physical(p.data)
+      wqe.u32[14] = bswap(tonumber(phy) / 2^32)
+      wqe.u32[15] = bswap(tonumber(phy) % 2^32)
+      print("size", bswap(wqe.u32[12]))
+      print("lkey", bswap(wqe.u32[13]))
+      print("high", bit.tohex(bswap(wqe.u32[14])))
+      print("low",  bit.tohex(bswap(wqe.u32[15])))
+   end
+
+   --local cq_ci = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x20)
+   --cq_ci[0] = 0
+
+   print("waiting for link up")
+   while cmdq:query_vport_state().oper_state ~= 1 do
+      C.usleep(1e6)
+   end
+
+   eq:poll()
+
+   print("Creating receive queue entries")
+
+   local rwqe_t = ffi.typeof[[
+     struct {
+       uint32_t length;
+       uint32_t lkey;
+       uint32_t address_high;
+       uint32_t address_low;
+     } *]]
+   local nrecv = 30
+   local rwqes = ffi.cast(rwqe_t, wq)
+   -- Create receive queue entries
+   for i = 0, nrecv-1 do
+      local p = packet.allocate()
+      local phy = memory.virtual_to_physical(p.data)
+      rwqes[i].length = bswap(p.length)
+      rwqes[i].lkey = bswap(rlkey)
+      rwqes[i].address_high = bswap(tonumber(phy) / 2^32)
+      rwqes[i].address_low  = bswap(tonumber(phy) % 2^32)
+   end
+      
+
+   print("Ringing send doorbell")
+   -- Update doorbell record
+   db_sq = ffi.cast(wq_db_t, db_sq)
+   db_sq.send = bswap(nsend)
+   db_sq.receive = bswap(nrecv)
+   -- Ring doorbell in blue flame registers
+   local bf    = ffi.cast("uint64_t *",
+                          ffi.cast("uint8_t *", base) + (uar * 4096) + 0x800)
+   bf[0] = wqes[nsend-1].u64[0]
+
+   C.usleep(1e5)
+
+   for name, WQ in pairs({send=cqes, receive=rcqes}) do
+      print("Scanning send completion queue: " .. name)
+      local cq_wqe = ffi.cast(wqe_t, WQ)
+      for i = 0, nsend+2 do
+         local opcodes = { [0] = 'requester', [1] = 'responder', [13] = 'requester error', [14] = 'responder error', [15] = 'invalid CQE'}
+         local opcode = shr(cq_wqe[i].u8[0x3F], 4)
+         local wqe_counter = shr(bswap(cq_wqe[i].u32[0x3C/4]), 16)
+         print(("CQE[%03d]: WQE=%05d %2d (%s)"):format(i, wqe_counter, opcode, opcodes[opcode]))
+         if opcode > 1 then
+            local syndromes = {
+               [0x1] = "Local_Length_Error",
+               [0x4] = "Local_Protection_Error",
+               [0x5] = "Work_Request_Flushed_Error",
+               [0x6] = "Memory_Window_Bind_Error",
+               [0x10] = "Bad_Response_Error",
+               [0x11] = "Local_Access_Error",
+               [0x12] = "Remote_Invalid_Request_Error",
+               [0x13] = "Remote_Access_Error",
+               [0x14] = "Remote_Operation_Error"
+            }
+            local syndrome = cq_wqe[i].u8[0x37]
+            print(("          syndrome = %d (%s)"):format(syndrome, syndromes[syndromes]))
+         end
+      end
+   end
+
+   print("Send CQ")
+   hexdump(cqes, 0, 64)
+   print("Recv CQ")
+   hexdump(rcqes, 0, 64)
+   --print(lib.hexdump(ffi.string(cqes, 64)))
+   print("CQ doorbell")
+   hexdump(db_ptr_cq, 0, 64)
+   print("SQ doorbell")
+   hexdump(db_sq, 0, 64)
+   print("SQ[0]")
+   hexdump(wq, 0, 64)
+
+   local qsq = cmdq:query_sq(sq)
+   print("query_sq:")
+   for k,v in pairs(qsq) do
+      print(k,v)
+   end
+   print("Finished test") io.flush()
+
+   os.exit(0)
 
    --[[
    cmdq:set_hca_cap()
