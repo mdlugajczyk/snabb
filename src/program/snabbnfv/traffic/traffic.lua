@@ -121,6 +121,10 @@ function bench (pciaddr, confpath, sockpath, npackets)
          else
             print("No LuaJIT profiling enabled ($NFV_PROF unset).")
          end
+         if os.getenv("NFV_TRACEPROF") then
+            require("jit.traceprof.traceprof").start()
+            main.traceprofiling = true
+         end
          if os.getenv("NFV_DUMP") then
             require("jit.dump").start(os.getenv("NFV_DUMP"), os.getenv("NFV_DUMP_FILE"))
             main.dumping = true
