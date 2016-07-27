@@ -134,7 +134,9 @@ end
 
 -- Cleanup after Snabb process.
 function shutdown (pid)
-   if not _G.developer_debug then
+   -- XXX Don't remove shm directory when SNABB_SHM_ROOT is used.
+   --     Confusing behavior?
+   if not _G.developer_debug and not os.getenv("SNABB_SHM_ROOT") then
       shm.unlink("//"..pid)
    end
 end
