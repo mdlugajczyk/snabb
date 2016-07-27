@@ -135,7 +135,8 @@ function qemu {
 }
 
 function packetblaster {
-    snabb $1 "packetblaster replay program/snabbnfv/test_fixtures/pcap/$2.pcap $1"
+    (unset SNABB_SHM_ROOT # not interested in capturing load generator state
+     snabb $1 "packetblaster replay program/snabbnfv/test_fixtures/pcap/$2.pcap $1")
 }
 
 function qemu_dpdk {
