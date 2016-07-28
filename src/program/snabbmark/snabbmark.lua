@@ -34,6 +34,8 @@ function gbits (bps)
 end
 
 function basic1 (npackets)
+   local S = require("syscall")
+   os.execute("perf stat -p "..S.getpid().." &>stat &") -- background 'perf stat'
    npackets = tonumber(npackets) or error("Invalid number of packets: " .. npackets)
    local c = config.new()
    -- Simple topology:
