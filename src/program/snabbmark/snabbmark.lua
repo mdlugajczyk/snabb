@@ -34,6 +34,11 @@ function gbits (bps)
 end
 
 function basic1 (npackets)
+
+   local S = require("syscall")
+   S.sched_setaffinity(0, {1})        -- lock to core #1
+   S.sched_setscheduler(0, "fifo", 1) -- realtime priority
+
    npackets = tonumber(npackets) or error("Invalid number of packets: " .. npackets)
    local c = config.new()
    -- Simple topology:
