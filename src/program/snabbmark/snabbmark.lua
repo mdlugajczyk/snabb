@@ -34,6 +34,7 @@ function gbits (bps)
 end
 
 function basic1 (npackets)
+   require("jit.v").on("jitv.txt")
    npackets = tonumber(npackets) or error("Invalid number of packets: " .. npackets)
    local c = config.new()
    -- Simple topology:
