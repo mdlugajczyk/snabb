@@ -406,7 +406,7 @@ local command_errors = {
    [0x40] = 'BAD_SIZE: More outstanding CQEs in CQ than new CQ size',
 }
 
-function cmdq:post(last_in_ofs, last_out_ofs)
+function cmdq:post(last_in_ofs, last_out_ofs,  async)
    if debug then
       local dumpoffset = 0
       print("command INPUT:")
@@ -422,10 +422,12 @@ function cmdq:post(last_in_ofs, last_out_ofs)
 
    self.init_seg:ring_doorbell(0) --post command
 
+   if async then return end
+
    --poll for command completion
    while self:getbits(0x3C, 0, 0) == 1 do
       if self.init_seg:getbits(0x1010, 31, 24) ~= 0 then
-         error("HCA health problem: " .. bit.tohex(self.init_seg:getbits(0x1010, 31, 0)))
+         error("HCA health syndrome: " .. bit.tohex(self.init_seg:getbits(0x1010, 31, 24)))
       end
       C.usleep(10000)
    end
@@ -467,6 +469,13 @@ function cmdq:enable_hca()
    self:setinbits(0x00, 31, 16, ENABLE_HCA)
    self:post(0x0C, 0x08)
 end
+
+function cmdq:disable_hca()
+   self:prepare("DISABLE_HCA", 0x0C, 0x08)
+   self:setinbits(0x00, 31, 16, DISABLE_HCA)
+   self:post(0x0C, 0x08, true)
+end
+
 
 function cmdq:query_issi()
    self:prepare("QUERY_ISSI", 0x0C, 0x6C)
@@ -520,6 +529,22 @@ function cmdq:query_pages(which)
    self:setinbits(0x04, 15, 0, codes[which])
    self:post(0x0C, 0x0C)
    return self:getoutbits(0x0C, 31, 0)
+end
+
+function cmdq:flush_pages()
+   self:prepare("MANAGE_PAGES", 0x10, 0x80C)
+   self:setinbits(0x00, 31, 16, MANAGE_PAGES)
+   self:setinbits(0x04, 15, 0, 2) -- return pages
+   self:setinbits(0x0C, 31, 0, 100)
+   --[[
+   for i=0, num_pages-1 do
+      local _, phy = memory.dma_alloc(4096, 4096)
+      self:setinbits(0x10 + i*8, 31,  0, ptrbits(phy, 63, 32))
+      self:setinbits(0x14 + i*8, 31, 12, ptrbits(phy, 31, 12))
+   end
+   ]]--
+   self:post(0x10, 0x80C)
+   return self:getoutbits(0x08, 31, 0)
 end
 
 function cmdq:alloc_pages(num_pages)
@@ -875,6 +900,12 @@ end
 -- XXX VPORT commands /may/ not be needed since we are not using SR-IOV.
 --     In this case the functions below can be removed.
 
+function cmdq:modify_vport_state(up)
+   self:prepare("MODIFY_VPORT_STATE", 0x0c, 0x0c)
+   self:setinbits(0x00, 31, 16, 0x751)
+   self:setinbits(0x0C,  7,  4, up and 1 or 0)
+end
+
 function cmdq:query_vport_state()
    self:prepare("QUERY_VPORT_STATE", 0x0c, 0x0c)
    self:setinbits(0x00, 31, 16, 0x750)
@@ -883,9 +914,20 @@ function cmdq:query_vport_state()
             oper_state  = self:getoutbits(0x0C, 3, 0) }
 end
 
+function cmdq:query_vport_counter()
+   self:prepare("QUERY_VPORT_COUNTER", 0x1c, 0x20c)
+   self:setinbits(0x00, 31, 16, 0x770)
+   self:post(0x1C, 0x20c)
+   print("vport counters")
+   for i = 0x10, 0x200, 4 do
+      local n = self:getoutbits(i, 31, 0)
+      if n > 0 then print(bit.tohex(i), n) end
+   end
+end
+
 function cmdq:modify_vport_state(admin_state)
    self:prepare("MODIFY_VPORT_STATE", 0x0c, 0x0c)
-   self:setinbits(0x00, 31, 16, MODIFY_VPORT_STATE)
+   self:setinbits(0x00, 31, 16, 0x751)
    self:setinbits(0x0C, 7, 4, admin_state)
    self:post(0x0C, 0x0C)
 end
@@ -1023,6 +1065,16 @@ function cmdq:create_rq(cqn, user_index, uar, pd, db_phy, rqmem)
    return self:getoutbits(0x08, 23, 0), rqmem
 end
 
+function cmdq:modify_rq(rqn, curr_state, next_state)
+   self:prepare("MODIFY_RQ", 0x20 + 0x30 + 0xC4, 0x0C)
+   self:setinbits(0x00, 31, 16, 0x909)
+   self:setinbits(0x08,
+                  31, 28, curr_state,
+                  27,  0, rqn)
+   self:setinbits(0x20 + 0x00, 23, 20, next_state)
+   self:post(0x20 + 0x30 + 0xC4, 0x0C)
+end
+
 function cmdq:modify_sq(sqn, curr_state, next_state)
    self:prepare("MODIFY_SQ", 0x20 + 0x30 + 0xC4, 0x0C)
    self:setinbits(0x00, 31, 16, 0x905)
@@ -1040,9 +1092,9 @@ function cmdq:create_sq(tis, cqn, user_index, uar, pd, db_phy, sqmem)
    -- Send queue
    self:setinbits(0x20 + 0x00,
                   31, 31, 1,    -- rlkey
-                  29, 29, 0,    -- fre
-                  28, 28, 0,    -- flush_in_error_en
-                  26, 24, 0,    -- min_wqe_inline_mode
+                  29, 29, 1,    -- fre
+                  28, 28, 1,    -- flush_in_error_en
+                  26, 24, 1,    -- min_wqe_inline_mode
                   23, 20, 0)    -- state = RST
    self:setinbits(0x20 + 0x04, 23, 0, user_index)
    self:setinbits(0x20 + 0x08, 23, 0, cqn)
@@ -1065,7 +1117,6 @@ function cmdq:create_sq(tis, cqn, user_index, uar, pd, db_phy, sqmem)
                   12, 8,  0xF,   -- log_wq_pg_sz = 0xF (max)
                   4,  0,  10)    -- log_wq_sz (1024 x 64 byte entries)
    local wqphy = memory.virtual_to_physical(sqmem)
-   --local wq, wqphy = memory.dma_alloc(1024 * 64, 4096)
    self:setinbits(0x20 + 0x30 + 0xC0, 31, 0, ptrbits(wqphy, 63, 32))
    self:setinbits(0x20 + 0x30 + 0xC4, 31, 0, ptrbits(wqphy, 31, 0))
    self:post(0x10 + 0x20 + 0x30 + 0xC4, 0x0C)
@@ -1138,8 +1189,9 @@ function cmdq:set_flow_table_entry_simple(table_id, table_type, group_id, flow_i
    self:setinbits(0x40 + 0x0C, 15, 0, 4) -- action = FWD_DST
    self:setinbits(0x40 + 0x10, 23, 0, 1) -- destination list size
    -- (Match value blank for wildcard)
-   self:setinbits(0x40 + 0x300, 31, 24, 2) -- destination type = TIR
-   self:setinbits(0x40 + 0x300, 23,  0, tir)
+   self:setinbits(0x40 + 0x300,
+                  31, 24, 2,
+                  23,  0, tir)
    self:post(0x40 + 0x300, 0x0C)
 end
 
@@ -1177,36 +1229,51 @@ function cmdq:get_port_loopback_capability(portnumber)
 end
 
 function cmdq:set_port_loopback(portnumber, loopback_mode)
-   self:prepare("ACCESS_REGISTER", 0x14, 0x10)
+   self:prepare("ACCESS_REGISTER", 0x14, 0x0C)
    self:setinbits(0x00, 31, 16, 0x805)
    self:setinbits(0x04, 15,  0, 0) -- write
    self:setinbits(0x08, 15,  0, 0x5018) -- PPLR (Port Physical Loopback Register)
    self:setinbits(0x10, 23, 16, portnumber)
-   self:setinbits(0x14,  7,  0, loopback_mode and 6 or 0) -- local or none
-   self:post(0x14, 0x10)
+   self:setinbits(0x14,  7,  0, loopback_mode and 2 or 0) -- local or none
+   self:post(0x14, 0x0C)
 end
 
 function cmdq:enable_loopback_mode(portnumber, loopback_mode)
-   C.usleep(3e6)
-   self:set_admin_status(portnumber, false)
-   C.usleep(3e6)
-   --local cap = self:get_port_loopback_capability(portnumber)
-   --local stat = self:get_port_status(portnumber)
-   --print("Port status:")
-   --for k,v in pairs(stat) do print(k,v) end
-   --if band(cap, 2) == 0 then
-   --   error("loopback mode not supported, capability mask: " .. cap)
-   --else
-   --   print("Loopback OK")
-   --end
-   --C.usleep(3e6)
-   self:set_port_loopback(portnumber, loopback_mode)
-   C.usleep(3e6)
-   self:set_admin_status(portnumber, true)
-   -- ACCESS REGISTER:
-   --   PAOS: Disable port
-   --   PPLR: Enable loopback
-   --   PAOS: Enable port
+   assert(loopback_mode == true)
+   --print("Loopback capability: ", self:get_port_loopback_capability(portnumber))
+   C.usleep(1e6)
+   --print("Port admin status:   ", self:get_port_status(portnumber).admin_status)
+   C.usleep(1e6)
+   --self:modify_vport_state(false)
+   print("Disable port in PAOS ", self:set_admin_status(portnumber, false))
+   C.usleep(1e6)
+   print("Set loopback mode", self:set_port_loopback(portnumber, true))
+   C.usleep(1e6)
+   print("Enable port in PAOS", self:set_admin_status(portnumber, true))
+   C.usleep(1e6)
+   self:modify_vport_state(true)
+
+   if false then
+      self:set_admin_status(portnumber, false)
+      C.usleep(3e6)
+      local cap = self:get_port_loopback_capability(portnumber)
+      local stat = self:get_port_status(portnumber)
+      print("Port status:")
+      for k,v in pairs(stat) do print(k,v) end
+      if band(cap, 2) == 0 then
+         error("loopback mode not supported, capability mask: " .. cap)
+      else
+         print("Loopback OK")
+      end
+      C.usleep(3e6)
+      self:set_port_loopback(portnumber, loopback_mode)
+      C.usleep(3e6)
+      self:set_admin_status(portnumber, true)
+      -- ACCESS REGISTER:
+      --   PAOS: Disable port
+      --   PPLR: Enable loopback
+      --   PAOS: Enable port
+   end
 end
 
 -- Teardown the NIC. mode = 0 (graceful) or 1 (panic)
@@ -1214,7 +1281,7 @@ function cmdq:teardown_hca(mode)
    self:prepare("TEARDOWN_HCA", 0x0c, 0x0c)
    self:setinbits(0x00, 31, 16, 0x103)
    self:setinbits(0x04, 15, 0, mode)
-   self:post(0x0C, 0x0C)
+   self:post(0x0C, 0x0C, true)
 end
 
 function cmdq:init_hca()
@@ -1292,15 +1359,24 @@ function ConnectX4:new(arg)
    --allocate and set the command queue which also initializes the nic
    local cmdq = cmdq:new(init_seg)
 
-   --trace("Teardown (graceful mode) to reset NIC")
-   --cmdq:teardown_hca(0)
-
    --8.2 HCA Driver Start-up
 
    trace("Write the physical location of the command queues to the init segment.")
    init_seg:cmdq_phy_addr(memory.virtual_to_physical(cmdq.entry))
 
-   --cmdq:teardown_hca()
+   --trace("Teardown (graceful mode) to reset NIC")
+   --[[
+   cmdq:teardown_hca(1)
+   cmdq:disable_hca()
+   debug = false
+   while true do
+      local flushed = cmdq:flush_pages()
+      print("flushed "..flushed)
+      if flushed == 0 then break end
+   end
+   --C.usleep(10000)
+   cmdq:disable_hca()
+   --]]
 
    trace("Wait for the 'initializing' field to clear")
    while not init_seg:ready() do
@@ -1341,12 +1417,15 @@ function ConnectX4:new(arg)
    print("query_pages'init'       ", init_pages)
    assert(init_pages > 0)
 
-   for i = 1, 3 do
+   for i = 1, 4 do
       cmdq:alloc_pages(init_pages)
    end
 
    cmdq:init_hca()
 
+   --os.exit(1)
+
+   --debug = false
    --print("LOOPBACK:", cmdq:get_port_loopback_capability(1))
    --cmdq:enable_loopback_mode(1, true)
 
@@ -1387,8 +1466,11 @@ function ConnectX4:new(arg)
    local cq, cqes = cmdq:create_cq(1024, uar, eq.eqn, db_phy_cq)
    print("cq               = " .. cq)
    local db_sq, db_phy_sq = memory.dma_alloc(16)
-   local sqmem = memory.dma_alloc(64*1024, 4096)
-   local rqmem = memory.dma_alloc(64*1024, 4096)
+   -- Allocate rqmem and sqmem contiguously
+   local rqmem = memory.dma_alloc(64 * 2 * 1024, 4096)
+   local sqmem = rqmem + 64 * 1024
+   --local sqmem = memory.dma_alloc(64*1024, 4096)
+   --local rqmem = memory.dma_alloc(64*1024, 4096)
 
    local sq, wq = cmdq:create_sq(tis, cq, 11, uar, pd, db_phy_sq, sqmem, mkey)
    cmdq:modify_sq(sq, 0, 1)
@@ -1400,18 +1482,17 @@ function ConnectX4:new(arg)
    eq:poll()
    local rq, rwq = cmdq:create_rq(rcq, 0, uar, pd, db_phy_sq, rqmem)
    print("rq               = " .. rq .. "("..bit.tohex(rq)..")")
+   cmdq:modify_rq(rq, 0, 1)
 
    local tir = cmdq:create_tir(rq, tdomain)
 
-   debug = true
    local rx_table_id = cmdq:create_root_flow_table('receive')
-   local tx_table_id = cmdq:create_root_flow_table('send')
+   --local tx_table_id = cmdq:create_root_flow_table('send')
    print("rx_flow_table    = " .. rx_table_id)
-   print("tx_flow_table    = " .. tx_table_id)
-   local group_id = cmdq:create_flow_group_wildcard(rx_table_id, 'receive', 0, 1)
-   --cmdq:set_flow_table_entry_simple(rx_table_id, 'receive', group_id, 0, tir)
-   --cmdq:set_flow_table_root(rx_table_id, 'receive')
-
+   --print("tx_flow_table    = " .. tx_table_id)
+   local group_id = cmdq:create_flow_group_wildcard(rx_table_id, 'receive', 0, 0)
+   cmdq:set_flow_table_entry_simple(rx_table_id, 'receive', group_id, 0, tir)
+   cmdq:set_flow_table_root(rx_table_id, 'receive')
 
    print("Creating send queue entries")
 
@@ -1424,28 +1505,30 @@ function ConnectX4:new(arg)
                              } *]])
    local wqes = ffi.cast(wqe_t, wq)
    -- Create the send WQEs
-   local nsend = 50
+   local nsend = 10
    for i = 0, nsend-1 do
       local wqe = wqes[i]
       local p = packet.allocate()
-      p.length = 60
+      p.length = 80
+      
       ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
       p.data[11] = i            -- last octet of smac = packet#
       p.data[12] = 0xff         -- ethertype = 0xFF00
       ffi.fill(p.data+14, p.length-14, i) -- payload = packet #
+      
+      ffi.fill(p.data, p.length, 0xff)
       -- 16B control segment
       wqe.u32[0] = bswap(shl(i, 8) + 0x0A)
       wqe.u32[1] = bswap(shl(sq, 8) + 4)
       wqe.u32[2] = bswap(shl(2, 2)) -- completion always
-      -- 32B ethernet segment (20 byte inline header)
-      wqe.u32[7] = bswap(shl(20, 16))         -- 20 byte inline header
-      C.full_memory_barrier()
-      ffi.copy(wqe.u8 + 0x1E, p.data, 20) -- inline headers
-      C.full_memory_barrier()
+      -- 32B ethernet segment (partial inline header)
+      local ninline = 16
+      wqe.u32[7] = bswap(shl(ninline, 16))         -- 20 byte inline header
+      ffi.copy(wqe.u8 + 0x1E, p.data, ninline) -- inline headers
       -- 16B send data segment (DMA pointer)
-      wqe.u32[12] = bswap(p.length)
+      wqe.u32[12] = bswap(p.length - ninline)
       wqe.u32[13] = bswap(rlkey)
-      local phy = memory.virtual_to_physical(p.data)
+      local phy = memory.virtual_to_physical(p.data + ninline)
       wqe.u32[14] = bswap(tonumber(phy) / 2^32)
       wqe.u32[15] = bswap(tonumber(phy) % 2^32)
       print("size", bswap(wqe.u32[12]))
@@ -1473,31 +1556,37 @@ function ConnectX4:new(arg)
        uint32_t address_high;
        uint32_t address_low;
      } *]]
-   --[[
-   local nrecv = 30
-   local rwqes = ffi.cast(rwqe_t, wq)
+
+   local nrecv = nsend
+   local rwqes = ffi.cast(rwqe_t, rwq)
+   local rxpackets = {}
    -- Create receive queue entries
    for i = 0, nrecv-1 do
       local p = packet.allocate()
       local phy = memory.virtual_to_physical(p.data)
-      rwqes[i].length = bswap(p.length)
+      rwqes[i].length = bswap(10000) -- XXX sizeof packet
       rwqes[i].lkey = bswap(rlkey)
       rwqes[i].address_high = bswap(tonumber(phy) / 2^32)
       rwqes[i].address_low  = bswap(tonumber(phy) % 2^32)
+      rxpackets[i] = p
    end
-   --]]
 
    print("Ringing send doorbell")
-   -- Update doorbell record
+--   for i = 0, nsend-1 do
+      --C.full_memory_barrier()
+      --C.usleep(100)
+      -- Update doorbell record
    db_sq = ffi.cast(wq_db_t, db_sq)
-   db_sq.send = bswap(nsend)
-   --db_sq.receive = bswap(nrecv)
+   db_sq.send = bswap(nsend-1)
+   db_sq.receive = bswap(nrecv)
+   C.full_memory_barrier()
    -- Ring doorbell in blue flame registers
    local bf    = ffi.cast("uint64_t *",
                           ffi.cast("uint8_t *", base) + (uar * 4096) + 0x800)
    bf[0] = wqes[nsend-1].u64[0]
+--   end
 
-   C.usleep(1e5)
+   C.usleep(0.5e6)
 
    for name, WQ in pairs({send=cqes, receive=rcqes}) do
       print("Scanning send completion queue: " .. name)
@@ -1506,8 +1595,13 @@ function ConnectX4:new(arg)
          local opcodes = { [0] = 'requester', [1] = 'responder', [13] = 'requester error', [14] = 'responder error', [15] = 'invalid CQE'}
          local opcode = shr(cq_wqe[i].u8[0x3F], 4)
          local wqe_counter = shr(bswap(cq_wqe[i].u32[0x3C/4]), 16)
-         print(("CQE[%03d]: WQE=%05d %2d (%s)"):format(i, wqe_counter, opcode, opcodes[opcode]))
-         if opcode > 1 then
+         local len = bswap(cq_wqe[i].u32[0x2C/4])
+         print(("CQE[%03d]: WQE=%05d len=%d %2d (%s)"):format(i, wqe_counter, len, opcode, opcodes[opcode]))
+         if opcode == 2 then
+            print("packet dump:")
+            print(lib.hexdump(ffi.string(rxpackets[wqe_counter].data, len)))
+         end
+         if opcode ~= 0 and opcode ~= 2 then
             local syndromes = {
                [0x1] = "Local_Length_Error",
                [0x4] = "Local_Protection_Error",
@@ -1525,6 +1619,8 @@ function ConnectX4:new(arg)
       end
    end
 
+   eq:poll()
+
    print("Send CQ")
    hexdump(cqes, 0, 64)
    print("Recv CQ")
@@ -1537,12 +1633,17 @@ function ConnectX4:new(arg)
    print("SQ[0]")
    hexdump(wq, 0, 64)
 
+   debug = false
    local qsq = cmdq:query_sq(sq)
    print("query_sq:")
    for k,v in pairs(qsq) do
       print(k,v)
    end
+
+   cmdq:query_vport_counter()
    print("Finished test") io.flush()
+
+   eq:poll()
 
    os.exit(0)
 
