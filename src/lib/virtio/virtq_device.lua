@@ -88,6 +88,7 @@ function VirtioVirtq:get_buffers (kind, ops, hdr_len)
       ops.packet_end(device, v_header_id, total_size, packet)
 
       avail = band(avail + 1, 65535)
+      self.virtq.used.idx = avail
    end
    self.avail = avail
 end
@@ -103,11 +104,12 @@ end
 local eventfd_one = ffi.new("uint64_t[1]", {1})
 
 function VirtioVirtq:signal_used ()
-   if self.virtq.used.idx ~= self.used then
+   if self.last_signal_used ~= self.used then
       self.virtq.used.idx = self.used
       C.full_memory_barrier()
       if band(self.virtq.avail.flags, C.VRING_F_NO_INTERRUPT) == 0 then
          C.write(self.callfd, eventfd_one, 8)
       end
+      self.last_signal_used = self.used
    end
 end
