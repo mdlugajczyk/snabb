@@ -279,6 +279,7 @@ function VhostUser:set_vring_kick (msg, fds, nfds)
 
    -- Kick enables processing in vhost-user protocol
    self.vhost_ready = true
+   jit.flush() -- XXX debug
 
    assert(idx < 42)
    if validfd then
