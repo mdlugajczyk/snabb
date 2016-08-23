@@ -87,28 +87,28 @@ local debug_hexdump = true      -- Print hexdumps (in Linux mlx5 format)
 -- is sensible. Exceptions are made for more important ones.
 
 -- hca object is the main interface towards the NIC firmware.
-hca = {}
+HCA = {}
 
 ---------------------------------------------------------------
 -- Startup & General commands
 ---------------------------------------------------------------
 
 -- Turn on the NIC.
-function hca:enable_hca ()
+function HCA:enable_hca ()
    self:command("ENABLE_HCA", 0x0C, 0x08)
       :input("opcode", 0x00, 31, 16, 0x104)
       :execute()
 end
 
 -- Initialize the NIC firmware.
-function hca:init_hca()
+function HCA:init_hca ()
    self:command("INIT_HCA", 0x0c, 0x0c)
       :input("opcode", 0x00, 31, 16, 0x102)
       :execute()
 end
 
 -- Set the software-firmware interface version to use.
-function hca:set_issi (issi)
+function HCA:set_issi (issi)
    self:command("SET_ISSI", 0x0C, 0x0C)
       :input("opcode", 0x00, 31, 16, 0x10B)
       :input("issi",   0x08, 15,  0, issi)
@@ -116,7 +116,7 @@ function hca:set_issi (issi)
 end
 
 -- Query the value of the "reserved lkey" for using physical addresses.
-function hca:query_rlkey()
+function HCA:query_rlkey ()
    self:command("QUERY_SPECIAL_CONTEXTS", 0x0C, 0x0C)
       :input("opcode", 0x00, 31, 16, 0x203)
       :execute()
@@ -125,7 +125,7 @@ function hca:query_rlkey()
 end
 
 -- Query how many pages of memory the NIC needs.
-function hca:query_pages (which)
+function HCA:query_pages (which)
    self:command("QUERY_PAGES", 0x0C, 0x0C)
       :input("opcode", 0x00, 31, 16, 0x107)
       :input("opmod",  0x04, 15,  0, ({boot=1,init=2,regular=3})[which])
@@ -134,7 +134,7 @@ function hca:query_pages (which)
 end
 
 -- Provide the NIC with freshly allocated memory.
-function hca:alloc_pages(num_pages)
+function HCA:alloc_pages (num_pages)
    self:command("MANAGE_PAGES", 0x10 + num_pages*8, 0x0C)
       :input("opcode",            0x00, 31, 16, 0x108)
       :input("opmod",             0x04, 15, 0, 1) -- allocate mode
@@ -149,7 +149,7 @@ function hca:alloc_pages(num_pages)
 end
 
 -- Query the NIC capabilities (maximum or current setting).
-function hca:query_hca_general_cap(max_or_current)
+function HCA:query_hca_general_cap (max_or_current)
    local opmod = assert(({max=0, current=1})[max_or_current])
    self:command("QUERY_HCA_CAP", 0x0C, 0x100C - 3000)
       :input("opcode", 0x00, 31, 16, 0x100)
@@ -224,14 +224,14 @@ end
 
 -- Teardown the NIC firmware.
 -- mode = 0 (graceful) or 1 (panic)
-function hca:teardown_hca (mode)
+function HCA:teardown_hca (mode)
    self:command("TEARDOWN_HCA", 0x0c, 0x0c)
       :input("opcode", 0x00, 31, 16, 0x103)
       :input("opmod",  0x04, 15, 0, mode)
       :execute()
 end
 
-function hca:disable_hca ()
+function HCA:disable_hca ()
    self:command("DISABLE_HCA", 0x0c, 0x0c)
       :input("opcode", 0x00, 31, 16, 0x103)
       :input("opmod",  0x04, 15, 0, mode)
@@ -243,7 +243,7 @@ end
 ---------------------------------------------------------------
 
 -- Create an event queue that can be accessed via the given UAR page number.
-function hca:create_eq(uar)
+function HCA:create_eq (uar)
    local log_eq_size = 7 -- 128 entries
    local ptr, phy = memory.dma_alloc(4096, 4096) -- memory for entries
    self:command("CREATE_EQ", 0x10C + numpages*8, 0x0C)
@@ -275,7 +275,7 @@ eq = {}
 eq.__index = eq
 
 -- Create event queue object.
-function eq:new(eqn, pointer, nentries)
+function eq:new (eqn, pointer, nentries)
    local ring = ffi.cast(ffi.typeof("$*", eqe_t), pointer)
    for i = 0, nentries-1 do
       ring[i].owner = 1
@@ -300,7 +300,7 @@ function eq:poll()
 end
 
 -- Handle an event.
-function eq:event()
+function eq:event ()
    print(("Got event %s.%s"):format(eqe.event_type, eqe.event_sub_type))
    error("Event handling not yet implemented")
 end
@@ -309,14 +309,14 @@ end
 -- Vport
 ---------------------------------------------------------------
 
-function hca:set_vport_admin_state(up)
+function HCA:set_vport_admin_state (up)
    self:command("MODIFY_VPORT_STATE", 0x0c, 0x0c)
       :input("opcode",      0x00, 31, 16, 0x751)
       :input("admin_state", 0x0C,  7,  4, up and 1 or 0)
       :execute()
 end
 
-function hca:query_vport_state()
+function HCA:query_vport_state ()
    self:command("QUERY_VPORT_STATE", 0x0c, 0x0c)
       :input("opcode", 0x00, 31, 16, 0x750)
       :execute()
@@ -324,7 +324,7 @@ function hca:query_vport_state()
             oper_state  = self:output(0x0C, 3, 0) }
 end
 
-function hca:query_vport_counter()
+function HCA:query_vport_counter ()
    self:command("QUERY_VPORT_COUNTER", 0x1c, 0x20c)
       :input("opcode", 0x00, 31, 16, 0x770)
       :execute()
@@ -336,7 +336,7 @@ function hca:query_vport_counter()
    end
 end
 
-function hca:query_nic_vport_context()
+function HCA:query_nic_vport_context ()
    self:command("QUERY_NIC_VPORT_CONTEXT", 0x0c, 0x10+0xFC)
       :input("opcode", 0x00, 31, 16, 0x754)
       :execute()
@@ -356,7 +356,7 @@ end
 ---------------------------------------------------------------
 
 -- Allocate a Transport Domain.
-function hca:alloc_transport_domain()
+function HCA:alloc_transport_domain ()
    self:command("ALLOC_TRANSPORT_DOMAIN", 0x0c, 0x0c)
       :input("opcode", 0x00, 31, 16, 0x816)
       :execute(0x0C, 0x0C)
@@ -364,7 +364,7 @@ function hca:alloc_transport_domain()
 end
 
 -- Create a TIR (Transport Interface Receive) with direct dispatch (no hashing)
-function hca:create_tir_direct(rqn, transport_domain)
+function HCA:create_tir_direct (rqn, transport_domain)
    self:command("CREATE_TIR", 0x10C, 0x0C)
       :input("opcode",           0x00,        31, 16, 0x900)
       :input("inline_rqn",       0x20 + 0x1C, 23, 0, rqn)
@@ -374,7 +374,7 @@ function hca:create_tir_direct(rqn, transport_domain)
 end
    
 -- Create TIS (Transport Interface Send)
-function hca:create_tis(prio, transport_domain)
+function HCA:create_tis (prio, transport_domain)
    self:command("CREATE_TIS", 0x20 + 0x9C, 0x0C)
       :input("opcode",           0x00, 31, 16, 0x912)
       :input("prio",             0x20 + 0x00, 19, 16, prio)
@@ -384,7 +384,7 @@ function hca:create_tis(prio, transport_domain)
 end
 
 -- Allocate a UAR (User Access Region) i.e. a page of MMIO registers.
-function hca:alloc_uar()
+function HCA:alloc_uar ()
    self:command("ALLOC_UAR", 0x0C, 0x0C)
       :input("opcode", 0x00, 31, 16, 0x802)
       :execute()
@@ -392,7 +392,7 @@ function hca:alloc_uar()
 end
 
 -- Allocate a Protection Domain.
-function hca:alloc_protection_domain()
+function HCA:alloc_protection_domain ()
    self:command("ALLOC_PD", 0x0C, 0x0C)
       :input("opcode", 0x00, 31, 16, 0x800)
       :execute()
@@ -401,7 +401,7 @@ end
 
 -- Create a completion queue.
 -- Return the completion queue number and a pointer to the CQE memory.
-function hca:create_cq(entries, uar_page, eqn, db_phy)
+function HCA:create_cq (entries, uar_page, eqn, db_phy)
    local ptr, phy = memory.dma_alloc(entries * 64, 4096)
    self:command("CREATE_CQ", 0x114, 0x0C)
       :input("opcode",        0x00,        31, 16, 0x400)
@@ -420,7 +420,7 @@ end
 
 -- Create a receive queue.
 -- Return the receive queue number and a pointer to the WQEs.
-function hca:create_rq(cqn, user_index, uar, pd, db_phy, rqmem)
+function HCA:create_rq (cqn, user_index, uar, pd, db_phy, rqmem)
    local rqphy = memory.virtual_to_physical(rqmem)
    self:command("CREATE_RQ", 0x20 + 0x30 + 0xC4, 0x0C)
       :input("opcode",        0x00, 31, 16, 0x908)
@@ -444,7 +444,7 @@ function hca:create_rq(cqn, user_index, uar, pd, db_phy, rqmem)
 end
 
 -- Modify a Receive Queue by making a state transition.
-function hca:modify_rq(rqn, curr_state, next_state)
+function HCA:modify_rq (rqn, curr_state, next_state)
    self:command("MODIFY_RQ", 0x20 + 0x30 + 0xC4, 0x0C)
       :input("opcode",     0x00,        31, 16, 0x909)
       :input("curr_state", 0x08,        31, 28, curr_state)
@@ -454,7 +454,7 @@ function hca:modify_rq(rqn, curr_state, next_state)
 end
 
 -- Modify a Send Queue by making a state transition.
-function hca:modify_sq(sqn, curr_state, next_state)
+function HCA:modify_sq (sqn, curr_state, next_state)
    self:command("MODIFY_SQ", 0x20 + 0x30 + 0xC4, 0x0C)
       :input("opcode",     0x00,        31, 16, 0x905)
       :input("curr_state", 0x08,        31, 28, curr_state)
@@ -465,7 +465,7 @@ end
 
 -- Create a Send Queue.
 -- Return the send queue number and a pointer to the WQEs.
-function hca:create_sq(tis, cqn, uar, pd, db_phy, sqmem)
+function HCA:create_sq (tis, cqn, uar, pd, db_phy, sqmem)
    local wqphy = memory.virtual_to_physical(sqmem)
    self:command("CREATE_SQ", 0x20 + 0x30 + 0xC4, 0x0C)
       :input("opcode",         0x00,               31, 16, 0x904)
@@ -495,7 +495,7 @@ NIC_RX = 0 -- Flow table type code for incoming packets
 NIC_TX = 1 -- Flow table type code for outgoing packets
 
 -- Create the root flow table.
-function hca:create_root_flow_table (table_type)
+function HCA:create_root_flow_table (table_type)
    self:command("CREATE_FLOW_TABLE", 0x3C, 0x0C)
       :input("opcode",     0x00,        31, 16, 0x930)
       :input("table_type", 0x10,        31, 24, table_type)
@@ -506,7 +506,7 @@ function hca:create_root_flow_table (table_type)
 end
 
 -- Set table as root flow table.
-function hca:set_flow_table_root (table_id, table_type)
+function HCA:set_flow_table_root (table_id, table_type)
    self:command("SET_FLOW_TABLE_ROOT", 0x3C, 0x0C)
       :input("opcode",     0x00, 31, 16, 0x92F)
       :input("table_type", 0x10, 31, 24, table_type)
@@ -515,7 +515,7 @@ function hca:set_flow_table_root (table_id, table_type)
 end
 
 -- Create a "wildcard" flow group that does not inspect any fields.
-function hca:create_flow_group_wildcard (table_id, table_type, start_ix, end_ix)
+function HCA:create_flow_group_wildcard (table_id, table_type, start_ix, end_ix)
    self:command("CREATE_FLOW_GROUP", 0x3FC, 0x0C)
       :input("opcode",         0x00, 31, 16, 0x933)
       :input("table_type",     0x10, 31, 24, table_type)
@@ -527,7 +527,7 @@ function hca:create_flow_group_wildcard (table_id, table_type, start_ix, end_ix)
 end
 
 -- Set a "wildcard" flow table entry that does not match on any fields.
-function hca:set_flow_table_entry_wildcard(table_id, table_type, group_id, flow_index, tir)
+function HCA:set_flow_table_entry_wildcard (table_id, table_type, group_id, flow_index, tir)
    self:command("SET_FLOW_TABLE_ENTRY", 0x40 + 0x300, 0x0C)
       :input("opcode", 0x00, 31, 16, 0x936)
       :input("opmod",        0x04,         15,  0, 0) -- new entry
@@ -553,7 +553,7 @@ PAOS = 0x5006 -- Port Administrative & Operational Status
 PPLR = 0x5018 -- Port Physical Loopback Register)
 
 -- Set the administrative status of the port (boolean up/down).
-function hca:set_admin_status (admin_up)
+function HCA:set_admin_status (admin_up)
    self:command("ACCESS_REGISTER", 0x1C, 0x0C)
       :input("opcode",       0x00, 31, 16, 0x805)
       :input("opmod",        0x04, 15,  0, 0) -- write
@@ -564,7 +564,7 @@ function hca:set_admin_status (admin_up)
       :execute()
 end
 
-function hca:get_port_status()
+function HCA:get_port_status ()
    self:command("ACCESS_REGISTER", 0x10, 0x1C)
       :input("opcode", 0x00, 31, 16, 0x805)
       :input("opmod",  0x04, 15,  0, 1) -- read
@@ -575,7 +575,7 @@ function hca:get_port_status()
            oper_status = self:output(0x10, 3, 0)}
 end
 
-function hca:get_port_loopback_capability()
+function HCA:get_port_loopback_capability ()
    self:command("ACCESS_REGISTER", 0x10, 0x14)
       :input("opcode",      0x00, 31, 16, 0x805)
       :input("opmod",       0x04, 15,  0, 1) -- read
@@ -586,7 +586,7 @@ function hca:get_port_loopback_capability()
    return capability
 end
 
-function hca:set_port_loopback(loopback_mode)
+function HCA:set_port_loopback (loopback_mode)
    self:command("ACCESS_REGISTER", 0x14, 0x0C)
       :input("opcode",        0x00, 31, 16, 0x805)
       :input("opmod",         0x04, 15,  0, 0) -- write
@@ -613,7 +613,7 @@ local max_mailboxes = 1000
 local data_per_mailbox = 0x200 -- Bytes of input/output data in a mailbox
 
 -- Create a command queue with dedicated/reusable DMA memory.
-function hca:new(init_seg)
+function HCA:new (init_seg)
    local entry = ffi.cast("uint32_t*", memory.dma_alloc(0x40))
    local inboxes, outboxes = {}, {}
    for i = 0, max_mailboxes-1 do
@@ -627,14 +627,16 @@ function hca:new(init_seg)
                         init_seg = init_seg,
                         size = init_seg:log_cmdq_size(),
                         stride = init_seg:log_cmdq_stride()},
-      self)
+      {__index = HCA})
 end
 
 -- Reset all data structures to zero values.
 -- This is to prevent leakage from one command to the next.
 local token = 0xAA
-function hca:command(command, last_input_offset, last_output_offset)
-   print("Command: " .. command)
+function HCA:command (command, last_input_offset, last_output_offset)
+   if debug_trace then
+      print("HCA command: " .. command)
+   end
    self.input_size  = last_input_offset + 4
    self.output_size = last_output_offset + 4
 
@@ -646,7 +648,6 @@ function hca:command(command, last_input_offset, last_output_offset)
    self:setbits(0x38, 31,  0, self.output_size)
    self:setbits(0x3C,  0,  0, 1) -- ownership = hardware
    self:setbits(0x3C, 31, 24, token)
-
    -- Mailboxes:
 
    -- How many mailboxes do we need?
@@ -690,43 +691,48 @@ function hca:command(command, last_input_offset, last_output_offset)
       end
    end
    token = (token == 255) and 1 or token+1
+   return self -- for method call chaining
 end
 
-function hca:getbits(ofs, bit2, bit1)
-   return getbits(getint(self.entry, ofs), bit2, bit1)
+function HCA:getbits (offset, hi, lo)
+   return getbits(getint(self.entry, offset), hi, lo)
 end
 
-function hca:setbits(ofs, hi, lo, value)
-   setint(self.entry, ofs, setbits(hi, lo, value))
+function HCA:setbits (offset, hi, lo, value)
+   local base = getint(self.entry, offset)
+   setint(self.entry, offset, setbits(hi, lo, value, base))
 end
 
-function hca:input(offset, hi, lo, value)
+function HCA:input (name, offset, hi, lo, value)
    assert(offset % 4 == 0)
-   if ofs <= 16 - 4 then -- inline
+   if debug_trace then
+      print(("input: offset = %4xh (%2d:%2d) %-12s = %5d (%xh)"):format(offset, hi, lo, name, value, value))
+   end
+   if offset <= 16 - 4 then -- inline
       self:setbits(0x10 + offset, hi, lo, value)
    else
-      local mailbox = math.floor((ofs - 16) / data_per_mailbox)
-      local offset = (ofs - 16) % data_per_mailbox
+      local mailbox_number = math.floor((offset - 16) / data_per_mailbox)
+      local mailbox_offset = (offset - 16) % data_per_mailbox
       local base = self:getbits(offset, hi, lo)
-      setint(self.inboxes[mailbox], offset, setbits(hi, lo, value, base))
+      setint(self.inboxes[mailbox_number], mailbox_offset, setbits(hi, lo, value, base))
+   end
+   return self -- for method call chaining
+end
+
+function HCA:output (offset, hi, lo)
+   if offset <= 16 - 4 then --inline
+      return self:getbits(0x20 + offset, hi, lo)
+   else
+      local mailbox_number = math.floor((offset - 16) / data_per_mailbox)
+      local mailbox_offset  = (offset - 16) % data_per_mailbox
+      return getbits(getint(self.outboxes[mailbox_number], mailbox_offset), hi, lo)
    end
 end
 
-function hca:getoutbits(ofs, bit2, bit1)
-   if ofs <= 16 - 4 then --inline
-      return self:getbits(0x20 + ofs, bit2, bit1)
-   else --output mailbox
-      local mailbox = math.floor((ofs - 16) / data_per_mailbox)
-      local offset  = (ofs - 16) % data_per_mailbox
-      local b = getbits(getint(self.outboxes[mailbox], offset), bit2, bit1)
-      return b
-   end
-end
 
 
 
-
-function hca:setinbits(ofs, ...) --bit1, bit2, val, ...
+function HCA:setinbits (ofs, ...) --bit1, bit2, val, ...
    assert(ofs % 4 == 0)
    if ofs <= 16 - 4 then --inline
       self:setbits(0x10 + ofs, ...)
@@ -737,7 +743,7 @@ function hca:setinbits(ofs, ...) --bit1, bit2, val, ...
    end
 end
 
-function hca:getoutbits(ofs, bit2, bit1)
+function HCA:getoutbits (ofs, bit2, bit1)
    if ofs <= 16 - 4 then --inline
       return self:getbits(0x20 + ofs, bit2, bit1)
    else --output mailbox
@@ -765,7 +771,7 @@ local delivery_errors = {
    --       This is consistent with both the PRM and the Linux mlx5_core driver.
 }
 
-local function checkz(z)
+local function checkz (z)
    if z == 0 then return end
    error('command error: '..(delivery_errors[z] or z))
 end
@@ -793,10 +799,10 @@ local command_errors = {
    [0x40] = 'BAD_SIZE: More outstanding CQEs in CQ than new CQ size',
 }
 
-function hca:execute()
+function HCA:execute ()
    local last_in_ofs = self.input_size
    local last_out_ofs = self.output_size
-   if debug then
+   if debug_hexdump then
       local dumpoffset = 0
       print("command INPUT:")
       dumpoffset = hexdump(self.entry, 0, 0x40, dumpoffset)
@@ -809,9 +815,8 @@ function hca:execute()
       end
    end
 
+   assert(self:getbits(0x3C, 0, 0) == 1)
    self.init_seg:ring_doorbell(0) --post command
-
-   if async then return end
 
    --poll for command completion
    while self:getbits(0x3C, 0, 0) == 1 do
@@ -821,7 +826,7 @@ function hca:execute()
       C.usleep(10000)
    end
 
-   if debug then
+   if debug_hexdump then
       local dumpoffset = 0
       print("command OUTPUT:")
       dumpoffset = hexdump(self.entry, 0, 0x40, dumpoffset)
@@ -845,7 +850,7 @@ function hca:execute()
 end
 
 -- see 12.2 Return Status Summary
-function hca:checkstatus()
+function HCA:checkstatus ()
    local status = self:getoutbits(0x00, 31, 24)
    local syndrome = self:getoutbits(0x04, 31, 0)
    if status == 0 then return end
@@ -866,38 +871,34 @@ end
 -- Described in the "Initialization Segment" section of the PRM.
 ---------------------------------------------------------------
 
-local init_seg = {}
+local InitializationSegment = {}
 
 -- Create an initialization segment object.
 -- ptr is a pointer to the memory-mapped registers.
-function init_seg:new (ptr)
-   return setmetatable({ptr = ptr}, {__index = init_seg})
+function InitializationSegment:new (ptr)
+   return setmetatable({ptr = cast('uint32_t*', ptr)}, {__index = InitializationSegment})
 end
 
-function init_seg:getbits(ofs, bit2, bit1)
-   return getbits(getint(self.ptr, ofs), bit2, bit1)
+function InitializationSegment:getbits (offset, hi, lo)
+   return getbits(getint(self.ptr, offset), hi, lo)
 end
 
-function init_seg:setbits(ofs, ...)
-   setint(self.ptr, ofs, setbits(...))
+function InitializationSegment:setbits (offset, hi, lo)
+   setint(self.ptr, offset, setbits(offset, hi, lo))
 end
 
-function init_seg:init(ptr)
-   return setmetatable({ptr = cast('uint32_t*', ptr)}, self)
-end
-
-function init_seg:fw_rev() --maj, min, subminor
+function InitializationSegment:fw_rev () --maj, min, subminor
    return
       self:getbits(0, 15, 0),
       self:getbits(0, 31, 16),
       self:getbits(4, 15, 0)
 end
 
-function init_seg:cmd_interface_rev()
+function InitializationSegment:cmd_interface_rev ()
    return self:getbits(4, 31, 16)
 end
 
-function init_seg:cmdq_phy_addr(addr)
+function InitializationSegment:cmdq_phy_addr (addr)
    if addr then
       --must write the MSB of the addr first
       self:setbits(0x10, 31, 0, ptrbits(addr, 63, 32))
@@ -910,45 +911,45 @@ function init_seg:cmdq_phy_addr(addr)
    end
 end
 
-function init_seg:nic_interface(mode)
+function InitializationSegment:nic_interface (mode)
    self:setbits(0x14, 9, 8, mode)
 end
 
-function init_seg:log_cmdq_size()
+function InitializationSegment:log_cmdq_size ()
    return self:getbits(0x14, 7, 4)
 end
 
-function init_seg:log_cmdq_stride()
+function InitializationSegment:log_cmdq_stride ()
    return self:getbits(0x14, 3, 0)
 end
 
-function init_seg:ring_doorbell(i)
+function InitializationSegment:ring_doorbell (i)
    self:setbits(0x18, i, i, 1)
 end
 
-function init_seg:ready(i, val)
+function InitializationSegment:ready (i, val)
    return self:getbits(0x1fc, 31, 31) == 0
 end
 
-function init_seg:nic_interface_supported()
+function InitializationSegment:nic_interface_supported ()
    return self:getbits(0x1fc, 26, 24) == 0
 end
 
-function init_seg:internal_timer()
+function InitializationSegment:internal_timer ()
    return
       self:getbits(0x1000, 31, 0) * 2^32 +
       self:getbits(0x1004, 31, 0)
 end
 
-function init_seg:clear_int()
+function InitializationSegment:clear_int ()
    self:setbits(0x100c, 0, 0, 1)
 end
 
-function init_seg:health_syndrome()
+function InitializationSegment:health_syndrome ()
    return self:getbits(0x1010, 31, 24)
 end
 
-function init_seg:dump()
+function InitializationSegment:dump ()
    print('fw_rev                  ', self:fw_rev())
    print('cmd_interface_rev       ', self:cmd_interface_rev())
    print('cmdq_phy_addr           ', self:cmdq_phy_addr())
@@ -976,7 +977,7 @@ end
 ConnectX4 = {}
 ConnectX4.__index = ConnectX4
 
-function ConnectX4:new(arg)
+function ConnectX4:new (arg)
    local self = setmetatable({}, self)
    local conf = config.parse_app_arg(arg)
    local pciaddress = pci.qualified(conf.pciaddress)
@@ -990,10 +991,10 @@ function ConnectX4:new(arg)
    local base, fd = pci.map_pci_memory(pciaddress, 0, true)
 
    trace("Read the initialization segment")
-   local init_seg = init_seg:init(base)
+   local init_seg = InitializationSegment:new(base)
 
    --allocate and set the command queue which also initializes the nic
-   local hca = hca:new(init_seg)
+   local hca = HCA:new(init_seg)
 
    --8.2 HCA Driver Start-up
 
@@ -1022,11 +1023,13 @@ function ConnectX4:new(arg)
    init_seg:dump()
 
    hca:enable_hca()
-   local issi = hca:query_issi()
-   hca:dump_issi(issi)
+   --local issi = hca:query_issi()
+   --hca:dump_issi(issi)
 
    --os.exit(0)
    hca:set_issi(1)
+
+   local rlkey = hca:query_rlkey()
 
    -- PRM: Execute QUERY_PAGES to understand the HCA need to boot pages.
    local boot_pages = hca:query_pages'boot'
@@ -1299,7 +1302,7 @@ function ConnectX4:new(arg)
    return self
 end
 
-function selftest()
+function selftest ()
    io.stdout:setvbuf'no'
 
    local pcidev = lib.getenv("SNABB_PCI_CONNECTX4_0")
@@ -1352,7 +1355,9 @@ end
 -- Return the value at offset from address.
 function getint (pointer, offset)
    assert(offset % 4 == 0, "offset not dword-aligned")
-   return bswap(pointer[offset/4])
+   local r = bswap(pointer[offset/4])
+   print("getint", pointer, offset, r, bit.tohex(r))
+   return r
 end
 
 -- Set the the value at offset from address.
@@ -1364,7 +1369,9 @@ end
 -- Return the hi:lo bits of value.
 function getbits (value, hi, lo)
    local mask = shl(2^(hi-lo+1)-1, lo)
-   return shr(band(val, mask), lo)
+   local r = shr(band(value, mask), lo)
+   print("getbits", bit.tohex(value), hi, lo, bit.tohex(r))
+   return r
 end
 
 -- Return the hi:lo bits of a pointer.
