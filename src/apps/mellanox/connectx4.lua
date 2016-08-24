@@ -139,7 +139,7 @@ function HCA:alloc_pages (num_pages)
       :input("opcode",            0x00, 31, 16, 0x108)
       :input("opmod",             0x04, 15, 0, 1) -- allocate mode
       :input("input_num_entries", 0x0C, 31, 0, num_pages, "input_num_entries")
-   for i=0, num_pages-1 do
+   for i=0, num_pages do
       local _, phy = memory.dma_alloc(4096, 4096)
       local name = ("pas[%d]"):format(i)
       self:input(name.." high", 0x10 + i*8, 31,  0, ptrbits(phy, 63, 32))
@@ -244,12 +244,13 @@ end
 
 -- Create an event queue that can be accessed via the given UAR page number.
 function HCA:create_eq (uar)
+   local numpages = 1
    local log_eq_size = 7 -- 128 entries
    local ptr, phy = memory.dma_alloc(4096, 4096) -- memory for entries
    self:command("CREATE_EQ", 0x10C + numpages*8, 0x0C)
       :input("opcode",        0x00,        31, 16, 0x301)
       :input("log_eq_size",   0x10 + 0x0C, 28, 24, log_eq_size)
-      :input("uar_page",      0x10 + 0x0C, 23,  0, uar_page)
+      :input("uar_page",      0x10 + 0x0C, 23,  0, uar)
       :input("log_page_size", 0x10 + 0x18, 28, 24, 2) -- XXX best value? 0 or max?
       :input("event bitmask", 0x10 + 0x5C, 31,  0, bits({PageRequest=0xB})) -- XXX more events?
       :input("pas[0] high",   0x110,       31,  0, ptrbits(phy, 63, 32))
@@ -428,16 +429,16 @@ function HCA:create_rq (cqn, user_index, uar, pd, db_phy, rqmem)
       :input("vlan_strip_disable", 0x20 + 0x00, 28, 28, 1)
       :input("user_index",    0x20 + 0x04, 23, 0, user_index)
       :input("cqn",           0x20 + 0x08, 23, 0, cqn)
-      :input("wq_type",       0x20 + 0x30 + 0x00, 31,  1, 1) -- cyclic
-      :input("pd",            0x20 + 0x30 + 0x08, 23, 0, pd)
-      :input("uar_page",      0x20 + 0x30 + 0x0C, 23, 0, user_index)
-      :input("dbr_addr high", 0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
-      :input("dbr_addr low",  0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
+      :input("wq_type",       0x20 + 0x30 + 0x00, 31, 28, 1) -- cyclic
+      :input("pd",            0x20 + 0x30 + 0x08, 23,  0, pd)
+      :input("uar_page",      0x20 + 0x30 + 0x0C, 23,  0, user_index)
+      :input("dbr_addr high", 0x20 + 0x30 + 0x10, 31,  0, ptrbits(db_phy, 63, 32))
+      :input("dbr_addr low",  0x20 + 0x30 + 0x14, 31,  0, ptrbits(db_phy, 31, 0))
       :input("log_wq_stride", 0x20 + 0x30 + 0x20, 19, 16, 4)
-      :input("page_size",     0x20 + 0x30 + 0x20, 12, 8, 4) -- XXX one big page?
-      :input("log_wq_size",   0x20 + 0x30 + 0x20, 4, 0, 10) -- XXX make parameter
+      :input("page_size",     0x20 + 0x30 + 0x20, 12,  8, 4) -- XXX one big page?
+      :input("log_wq_size",   0x20 + 0x30 + 0x20,  4 , 0, 10) -- XXX make parameter
       :input("pas[0] high",   0x20 + 0x30 + 0xC0, 63, 32, ptrbits(rqphy, 63, 32))
-      :input("pas[0] low",    0x20 + 0x30 + 0xC4, 31, 0,  ptrbits(rqphy, 31, 0))
+      :input("pas[0] low",    0x20 + 0x30 + 0xC4, 31,  0, ptrbits(rqphy, 31, 0))
       :execute()
    local rqn = self:output(0x08, 23, 0)
    return rqn, rqmem
@@ -482,7 +483,7 @@ function HCA:create_sq (tis, cqn, uar, pd, db_phy, sqmem)
       :input("pas[0] high",    0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
       :input("pas[0] low",     0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
       :input("log_wq_stride",  0x20 + 0x30 + 0x20, 19, 16, 6)
-      :input("log_wq_page_sz", 0x20 + 0x30 + 0x20, 12, 8,  0xF) -- XXX check
+      :input("log_wq_page_sz", 0x20 + 0x30 + 0x20, 12, 8,  6) -- XXX check
       :input("log_wq_size",    0x20 + 0x30 + 0x20, 4,  0,  10) -- XXX make configurable
       :input("pas[0] high",    0x20 + 0x30 + 0xC0, 31, 0, ptrbits(wqphy, 63, 32))
       :input("pas[0] low",     0x20 + 0x30 + 0xC4, 31, 0, ptrbits(wqphy, 31, 0))
@@ -524,12 +525,14 @@ function HCA:create_flow_group_wildcard (table_id, table_type, start_ix, end_ix)
       :input("end_ix",         0x24, 31,  0, end_ix) -- (inclusive)
       :input("match_criteria", 0x3C,  7,  0, 0) -- match outer headers
       :execute()
+   local group_id = self:output(0x08, 23, 0)
+   return group_id
 end
 
 -- Set a "wildcard" flow table entry that does not match on any fields.
 function HCA:set_flow_table_entry_wildcard (table_id, table_type, group_id, flow_index, tir)
    self:command("SET_FLOW_TABLE_ENTRY", 0x40 + 0x300, 0x0C)
-      :input("opcode", 0x00, 31, 16, 0x936)
+      :input("opcode",       0x00,         31, 16, 0x936)
       :input("opmod",        0x04,         15,  0, 0) -- new entry
       :input("table_type",   0x10,         31, 24, table_type)
       :input("table_id",     0x14,         23,  0, table_id)
@@ -676,8 +679,8 @@ function HCA:command (command, last_input_offset, last_output_offset)
       setint(self.inboxes[i],  0x238, i)
       setint(self.outboxes[i], 0x238, i)
       -- Tokens to match command entry
-      setint(self.inboxes[i],  0x23C, setbits(23, 16, token))
-      setint(self.outboxes[i], 0x23C, setbits(23, 16, token))
+      setint(self.inboxes[i],  0x23C, setbits(23, 16, token, 0))
+      setint(self.outboxes[i], 0x23C, setbits(23, 16, token, 0))
       -- Set 'next' mailbox pointers (when used)
       if i < ninboxes then
          local phy = memory.virtual_to_physical(self.inboxes[i+1])
@@ -713,8 +716,9 @@ function HCA:input (name, offset, hi, lo, value)
    else
       local mailbox_number = math.floor((offset - 16) / data_per_mailbox)
       local mailbox_offset = (offset - 16) % data_per_mailbox
-      local base = self:getbits(offset, hi, lo)
-      setint(self.inboxes[mailbox_number], mailbox_offset, setbits(hi, lo, value, base))
+      local base = getint(self.inboxes[mailbox_number], mailbox_offset)
+      local newvalue = setbits(hi, lo, value, base)
+      setint(self.inboxes[mailbox_number], mailbox_offset, newvalue)
    end
    return self -- for method call chaining
 end
@@ -883,8 +887,9 @@ function InitializationSegment:getbits (offset, hi, lo)
    return getbits(getint(self.ptr, offset), hi, lo)
 end
 
-function InitializationSegment:setbits (offset, hi, lo)
-   setint(self.ptr, offset, setbits(offset, hi, lo))
+function InitializationSegment:setbits (offset, hi, lo, value)
+   local base = getint(self.ptr, offset)
+   setint(self.ptr, offset, setbits(hi, lo, value, base))
 end
 
 function InitializationSegment:fw_rev () --maj, min, subminor
@@ -986,7 +991,7 @@ function ConnectX4:new (arg)
    -- (PRM does not suggest this but it is practical for resetting the
    -- firmware from bad states.)
    pci.unbind_device_from_linux(pciaddress)
-   --pci.reset_device(pciaddress)
+   pci.reset_device(pciaddress)
    pci.set_bus_master(pciaddress, true)
    local base, fd = pci.map_pci_memory(pciaddress, 0, true)
 
@@ -1029,8 +1034,6 @@ function ConnectX4:new (arg)
    --os.exit(0)
    hca:set_issi(1)
 
-   local rlkey = hca:query_rlkey()
-
    -- PRM: Execute QUERY_PAGES to understand the HCA need to boot pages.
    local boot_pages = hca:query_pages'boot'
    print("query_pages'boot'       ", boot_pages)
@@ -1049,16 +1052,28 @@ function ConnectX4:new (arg)
       print(("  %-24s = %-3s (%s)"):format(k, cur[k], max[k]))
    end
 
-   hca:set_hca_cap('general', cur)
-
    -- Initialization pages
    local init_pages = hca:query_pages('init')
    print("query_pages'init'       ", init_pages)
    assert(init_pages > 0)
 
    for i = 1, 4 do
+      local n = init_pages
+      while n > 0 do
+         local c = 500
+         hca:alloc_pages(math.min(n, c))
+         n = n - c
+      end
+   end
+
+   --print("OUT")
+   --os.exit(33)
+
+   --[[
+   for i = 1, 4 do
       hca:alloc_pages(init_pages)
    end
+   --]]
 
    hca:init_hca()
 
@@ -1092,12 +1107,10 @@ function ConnectX4:new (arg)
    local uar = hca:alloc_uar()
    print("uar              = " .. uar)
 
-   local rlkey = hca:query_special_contexts()
+   local rlkey = hca:query_rlkey()
    print("reserved lkey    = " .. rlkey)
-   local pd = hca:alloc_pd()
+   local pd = hca:alloc_protection_domain()
    print("protection dom.  = " .. pd)
-   local mkey = hca:create_mkey(pd)
-   print("mkey             = " .. mkey)
 
    eq:poll()
 
@@ -1111,7 +1124,7 @@ function ConnectX4:new (arg)
    --local sqmem = memory.dma_alloc(64*1024, 4096)
    --local rqmem = memory.dma_alloc(64*1024, 4096)
 
-   local sq, wq = hca:create_sq(tis, cq, uar, pd, db_phy_sq, sqmem, mkey)
+   local sq, wq = hca:create_sq(tis, cq, uar, pd, db_phy_sq, sqmem)
    hca:modify_sq(sq, 0, 1)
    print("sq               = " .. sq)
 
@@ -1123,15 +1136,15 @@ function ConnectX4:new (arg)
    print("rq               = " .. rq .. "("..bit.tohex(rq)..")")
    hca:modify_rq(rq, 0, 1)
 
-   local tir = hca:create_tir(rq, tdomain)
+   local tir = hca:create_tir_direct(rq, tdomain)
 
-   local rx_table_id = hca:create_root_flow_table('receive')
+   local rx_table_id = hca:create_root_flow_table(NIC_RX)
    --local tx_table_id = hca:create_root_flow_table('send')
    print("rx_flow_table    = " .. rx_table_id)
    --print("tx_flow_table    = " .. tx_table_id)
-   local group_id = hca:create_flow_group_wildcard(rx_table_id, 'receive', 0, 0)
-   hca:set_flow_table_entry_wildcard(rx_table_id, 'receive', group_id, 0, tir)
-   hca:set_flow_table_root(rx_table_id, 'receive')
+   local group_id = hca:create_flow_group_wildcard(rx_table_id, NIC_RX, 0, 0)
+   hca:set_flow_table_entry_wildcard(rx_table_id, NIC_RX, group_id, 0, tir)
+   hca:set_flow_table_root(rx_table_id, NIC_RX)
 
    print("Creating send queue entries")
 
@@ -1356,7 +1369,7 @@ end
 function getint (pointer, offset)
    assert(offset % 4 == 0, "offset not dword-aligned")
    local r = bswap(pointer[offset/4])
-   print("getint", pointer, offset, r, bit.tohex(r))
+   --print("getint", pointer, offset, r, bit.tohex(r))
    return r
 end
 
@@ -1370,7 +1383,7 @@ end
 function getbits (value, hi, lo)
    local mask = shl(2^(hi-lo+1)-1, lo)
    local r = shr(band(value, mask), lo)
-   print("getbits", bit.tohex(value), hi, lo, bit.tohex(r))
+   --print("getbits", bit.tohex(value), hi, lo, bit.tohex(r))
    return r
 end
 
