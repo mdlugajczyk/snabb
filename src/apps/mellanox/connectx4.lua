@@ -48,6 +48,131 @@ local debug_trace   = true      -- Print trace messages
 local debug_hexdump = true      -- Print hexdumps (in Linux mlx5 format)
 
 
+---------------------------------------------------------------
+-- ConnectX4 Snabb app.
+--
+-- Uses the driver routines to implement ConnectX-4 support in
+-- the Snabb app network.
+---------------------------------------------------------------
+
+ConnectX4 = {}
+ConnectX4.__index = ConnectX4
+
+function ConnectX4:new (arg)
+   local self = setmetatable({}, self)
+   local conf = config.parse_app_arg(arg)
+   local pciaddress = pci.qualified(conf.pciaddress)
+
+   local sendq_size = conf.sendq_size or 1024
+   local recvq_size = conf.recvq_size or 1024
+
+   -- Perform a hard reset of the device to bring it into a blank state.
+   --
+   -- Reset is performed at PCI level instead of via firmware command.
+   -- This is intended to be robust to problems like bad firmware states.
+   pci.unbind_device_from_linux(pciaddress)
+   pci.reset_device(pciaddress)
+   pci.set_bus_master(pciaddress, true)
+
+   -- Setup the command channel
+   --
+   local base, fd = pci.map_pci_memory(pciaddress, 0, true)
+   local init_seg = InitializationSegment:new(base)
+   local hca = HCA:new(init_seg)
+
+   trace("Write the physical location of the command queues to the init segment.")
+   init_seg:cmdq_phy_addr(memory.virtual_to_physical(hca.entry))
+   if debug_trace then init_seg:dump() end
+   trace("Wait for the 'initializing' field to clear")
+   while not init_seg:ready() do
+      C.usleep(1000)
+   end
+
+   -- Boot the card
+   --
+   hca:enable_hca()
+   hca:set_issi(1)
+   hca:alloc_pages(hca:query_pages("boot"))
+   if debug_trace then self:dump_capabilities() end
+
+   -- Initialize the card
+   --
+   hca:alloc_pages(hca:query_pages("init"))
+   hca:init_hca()
+   hca:alloc_pages(hca:query_pages("regular"))
+
+   if debug_trace then self:check_vport() end
+
+   -- Create basic objects that we need
+   --
+   local uar = hca:alloc_uar()
+   local eq = hca:create_eq(uar)
+   local pd = hca:alloc_protection_domain()
+   local tdomain = hca:alloc_transport_domain()
+   local rlkey = hca:query_rlkey()
+
+   -- Create send and receive queues & associated objects
+   --
+   local tis = hca:create_tis(0, tdomain)
+   local send_cq = hca:create_cq(1024, uar, eq.eqn)
+   local recv_cq = hca:create_cq(1024, uar, eq.eqn)
+
+   -- Allocate work queue memory (receive & send contiguous in memory)
+   local wq_doorbell = memory.dma_alloc(16)
+   local sendq_size = 1024
+   local recvq_size = 1024
+   local workqueues = memory.dma_alloc(64 * (sendq_size + recvq_size), 4096)
+   local rwq = workqueues                   -- receive work queue
+   local swq = workqueues + 64 * recvq_size -- send work queue
+
+   -- Create the queue objects
+   local sq = hca:create_sq(send_cq.cqn, pd, sendq_size, wq_doorbell, swq, tis)
+   local rq = hca:create_rq(recv_cq.cqn, pd, recvq_size, wq_doorbell, rwq)
+   local tir = hca:create_tir_direct(rq.rqn, tdomain)
+
+   -- Setup packet dispatching.
+   -- Just a "wildcard" flow group to send RX packets to the receive queue.
+   --
+   local rx_flow_table_id = hca:create_root_flow_table(NIC_RX)
+   local flow_group_id = hca:create_flow_group_wildcard(rx_flow_table_id, NIC_RX, 0, 0)
+   hca:set_flow_table_entry_wildcard(rx_flow_table_id, NIC_RX, flow_group_id, 0, tir)
+   hca:set_flow_table_root(rx_flow_table_id, NIC_RX)
+
+   function self:stop()
+      pci.set_bus_master(pciaddress, false)
+      pci.reset_device(pciaddress)
+      pci.close_pci_resource(fd, base)
+      base, fd = nil
+   end
+
+   return self
+end
+
+function ConnectX4:dump_capabilities ()
+   if true then return end
+   -- Print current and maximum card capabilities.
+   -- XXX Check if we have any specific requirements that we need to
+   --     set and/or assert on.
+   local cur = self.hca:query_hca_general_cap('current')
+   local max = self.hca:query_hca_general_cap('max')
+   print'Capabilities - current and (maximum):'
+   for k in pairs(cur) do
+      print(("  %-24s = %-3s (%s)"):format(k, cur[k], max[k]))
+   end
+end
+
+function ConnectX4:check_vport ()
+   if true then return end
+   local vport_ctx = hca:query_nic_vport_context()
+   for k,v in pairs(vport_ctx) do
+      print(k,v)
+   end
+   local vport_state = hca:query_vport_state()
+   for k,v in pairs(vport_state) do
+      print(k,v)
+   end
+end
+
 
 ---------------------------------------------------------------
 -- Firmware commands.
@@ -889,7 +1014,7 @@ end
 -- Described in the "Initialization Segment" section of the PRM.
 ---------------------------------------------------------------
 
-local InitializationSegment = {}
+InitializationSegment = {}
 
 -- Create an initialization segment object.
 -- ptr is a pointer to the memory-mapped registers.
@@ -981,149 +1106,6 @@ function InitializationSegment:dump ()
 end
 
 
-
----------------------------------------------------------------
--- ConnectX4 Snabb app.
---
--- Uses the driver routines to implement ConnectX-4 support in
--- the Snabb app network.
----------------------------------------------------------------
-
--- WORK-IN-PROGRESS: Just now this code implements a proof-of-concept
--- routine that initializes the HCA and then sends and receives some
--- packets. This needs to be generalized. Here be dragons.
-
-ConnectX4 = {}
-ConnectX4.__index = ConnectX4
-
-function ConnectX4:new (arg)
-   local self = setmetatable({}, self)
-   local conf = config.parse_app_arg(arg)
-   local pciaddress = pci.qualified(conf.pciaddress)
-
-   -- Perform a hard reset of the device to bring it into a blank state.
-   --
-   -- Reset is performed at PCI level instead of via firmware command.
-   -- This is intended to be robust to problems like bad firmware states.
-   pci.unbind_device_from_linux(pciaddress)
-   pci.reset_device(pciaddress)
-   pci.set_bus_master(pciaddress, true)
-
-   -- Setup the command channel
-   --
-   local base, fd = pci.map_pci_memory(pciaddress, 0, true)
-   local init_seg = InitializationSegment:new(base)
-   local hca = HCA:new(init_seg)
-
-   trace("Write the physical location of the command queues to the init segment.")
-   init_seg:cmdq_phy_addr(memory.virtual_to_physical(hca.entry))
-   if debug_trace then init_seg:dump() end
-   trace("Wait for the 'initializing' field to clear")
-   while not init_seg:ready() do
-      C.usleep(1000)
-   end
-
-   -- Boot the card
-   --
-   hca:enable_hca()
-   hca:set_issi(1)
-   hca:alloc_pages(hca:query_pages("boot"))
-   if debug_trace then self:dump_capabilities() end
-
-   -- Initialize the card
-   --
-   hca:alloc_pages(hca:query_pages("init"))
-   hca:init_hca()
-   hca:alloc_pages(hca:query_pages("regular"))
-
-   if debug_trace then self:check_vport() end
-
-   -- Create basic objects that we need
-   --
-   local uar = hca:alloc_uar()
-   local eq = hca:create_eq(uar)
-   local pd = hca:alloc_protection_domain()
-   local tdomain = hca:alloc_transport_domain()
-   local rlkey = hca:query_rlkey()
-
-   -- Create send and receive queues & associated objects
-   --
-   local tis = hca:create_tis(0, tdomain)
-   local send_cq = hca:create_cq(1024, uar, eq.eqn)
-   local recv_cq = hca:create_cq(1024, uar, eq.eqn)
-
-   -- Allocate work queue memory (receive & send contiguous in memory)
-   local wq_doorbell = memory.dma_alloc(16)
-   local qsize = 1024
-   local workqueues = memory.dma_alloc(64*qsize * 2, 4096)
-   local rwq = workqueues            -- receive work queue
-   local swq = workqueues + 64*qsize -- send work queue
-
-   -- Create the queue objects
-   local sq = hca:create_sq(send_cq.cqn, pd, qsize, wq_doorbell, swq, tis)
-   local rq = hca:create_rq(recv_cq.cqn, pd, qsize, wq_doorbell, rwq)
-   local tir = hca:create_tir_direct(rq.rqn, tdomain)
-
-   -- Setup packet dispatching.
-   -- Just a "wildcard" flow group to send RX packets to the receive queue.
-   --
-   local rx_flow_table_id = hca:create_root_flow_table(NIC_RX)
-   local flow_group_id = hca:create_flow_group_wildcard(rx_flow_table_id, NIC_RX, 0, 0)
-   hca:set_flow_table_entry_wildcard(rx_flow_table_id, NIC_RX, flow_group_id, 0, tir)
-   hca:set_flow_table_root(rx_flow_table_id, NIC_RX)
-
-   function self:stop()
-      pci.set_bus_master(pciaddress, false)
-      pci.reset_device(pciaddress)
-      pci.close_pci_resource(fd, base)
-      base, fd = nil
-   end
-
-   return self
-end
-
-function ConnectX4:dump_capabilities ()
-   if true then return end
-   -- Print current and maximum card capabilities.
-   -- XXX Check if we have any specific requirements that we need to
-   --     set and/or assert on.
-   local cur = self.hca:query_hca_general_cap('current')
-   local max = self.hca:query_hca_general_cap('max')
-   print'Capabilities - current and (maximum):'
-   for k in pairs(cur) do
-      print(("  %-24s = %-3s (%s)"):format(k, cur[k], max[k]))
-   end
-end
-
-function ConnectX4:check_vport ()
-   if true then return end
-   local vport_ctx = hca:query_nic_vport_context()
-   for k,v in pairs(vport_ctx) do
-      print(k,v)
-   end
-   local vport_state = hca:query_vport_state()
-   for k,v in pairs(vport_state) do
-      print(k,v)
-   end
-end
-
-function selftest ()
-   io.stdout:setvbuf'no'
-
-   local pcidev = lib.getenv("SNABB_PCI_CONNECTX4_0")
-   -- XXX check PCI device type
-   if not pcidev then
-      print("SNABB_PCI_CONNECTX4_0 not set")
-      os.exit(engine.test_skipped_code)
-   end
-
-   local device_info = pci.device_info(pcidev)
-   local app = ConnectX4:new{pciaddress = pcidev}
-   app:stop()
-end
-
-
-
 ---------------------------------------------------------------
 -- Utilities.
 ---------------------------------------------------------------
@@ -1200,3 +1182,19 @@ function log2size (size)
    --       See http://www.mathwords.com/c/change_of_base_formula.htm
    return math.ceil(math.log(size) / math.log(2))
 end
+
+function selftest ()
+   io.stdout:setvbuf'no'
+
+   local pcidev = lib.getenv("SNABB_PCI_CONNECTX4_0")
+   -- XXX check PCI device type
+   if not pcidev then
+      print("SNABB_PCI_CONNECTX4_0 not set")
+      os.exit(engine.test_skipped_code)
+   end
+
+   local device_info = pci.device_info(pcidev)
+   local app = ConnectX4:new{pciaddress = pcidev}
+   app:stop()
+end
+
