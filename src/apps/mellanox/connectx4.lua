@@ -400,48 +400,56 @@ function HCA:alloc_protection_domain ()
    return self:output(0x08, 23, 0)
 end
 
--- Create a completion queue.
--- Return the completion queue number and a pointer to the CQE memory.
+-- Create a completion queue and return a completion queue object.
 function HCA:create_cq (entries, uar_page, eqn, db_phy)
-   local ptr, phy = memory.dma_alloc(entries * 64, 4096)
+   local doorbell, doorbell_phy = memory.dma_alloc(16)
+   -- Memory for completion queue entries
+   local cqe, cqe_phy = memory.dma_alloc(entries * 64, 4096)
    self:command("CREATE_CQ", 0x114, 0x0C)
       :input("opcode",        0x00,        31, 16, 0x400)
       :input("log_cq_size",   0x10 + 0x0C, 28, 24, 10)
       :input("uar_page",      0x10 + 0x0C, 23,  0, uar_page)
       :input("c_eqn",         0x10 + 0x14,  7,  0, eqn)
       :input("log_page_size", 0x10 + 0x18, 28, 24, 4)
-      :input("db_addr high",  0x10 + 0x38, 31,  0, ptrbits(db_phy, 63, 32))
-      :input("db_addr_low",   0x10 + 0x3C, 31,  0, ptrbits(db_phy, 31, 0))
-      :input("pas[0] high",   0x110,       31,  0, ptrbits(phy, 63, 32))
-      :input("pas[0] low",    0x114,       31,  0, ptrbits(phy, 31, 0))
+      :input("db_addr high",  0x10 + 0x38, 31,  0, ptrbits(doorbell_phy, 63, 32))
+      :input("db_addr_low",   0x10 + 0x3C, 31,  0, ptrbits(doorbell_phy, 31, 0))
+      :input("pas[0] high",   0x110,       31,  0, ptrbits(cqe_phy, 63, 32))
+      :input("pas[0] low",    0x114,       31,  0, ptrbits(cqe_phy, 31, 0))
       :execute()
    local cqn = self:output(0x08, 23, 0)
-   return cqn, ptr
+   return { cqn = cqn, doorbell = doorbell, cqe = cqe }
 end
 
--- Create a receive queue.
+-- Create a receive queue and return a receive queue object.
 -- Return the receive queue number and a pointer to the WQEs.
-function HCA:create_rq (cqn, user_index, uar, pd, db_phy, rqmem)
-   local rqphy = memory.virtual_to_physical(rqmem)
+function HCA:create_rq (cqn, pd, size, doorbell, rwq)
+   local log_wq_size = log2size(size)
+   local db_phy = memory.virtual_to_physical(doorbell)
+   local rwq_phy = memory.virtual_to_physical(rwq)
    self:command("CREATE_RQ", 0x20 + 0x30 + 0xC4, 0x0C)
       :input("opcode",        0x00, 31, 16, 0x908)
       :input("rlkey",         0x20 + 0x00, 31, 31, 1)
       :input("vlan_strip_disable", 0x20 + 0x00, 28, 28, 1)
-      :input("user_index",    0x20 + 0x04, 23, 0, user_index)
       :input("cqn",           0x20 + 0x08, 23, 0, cqn)
       :input("wq_type",       0x20 + 0x30 + 0x00, 31, 28, 1) -- cyclic
       :input("pd",            0x20 + 0x30 + 0x08, 23,  0, pd)
-      :input("uar_page",      0x20 + 0x30 + 0x0C, 23,  0, user_index)
       :input("dbr_addr high", 0x20 + 0x30 + 0x10, 31,  0, ptrbits(db_phy, 63, 32))
       :input("dbr_addr low",  0x20 + 0x30 + 0x14, 31,  0, ptrbits(db_phy, 31, 0))
       :input("log_wq_stride", 0x20 + 0x30 + 0x20, 19, 16, 4)
       :input("page_size",     0x20 + 0x30 + 0x20, 12,  8, 4) -- XXX one big page?
-      :input("log_wq_size",   0x20 + 0x30 + 0x20,  4 , 0, 10) -- XXX make parameter
-      :input("pas[0] high",   0x20 + 0x30 + 0xC0, 63, 32, ptrbits(rqphy, 63, 32))
-      :input("pas[0] low",    0x20 + 0x30 + 0xC4, 31,  0, ptrbits(rqphy, 31, 0))
+      :input("log_wq_size",   0x20 + 0x30 + 0x20,  4 , 0, log_wq_size)
+      :input("pas[0] high",   0x20 + 0x30 + 0xC0, 63, 32, ptrbits(rwq_phy, 63, 32))
+      :input("pas[0] low",    0x20 + 0x30 + 0xC4, 31,  0, ptrbits(rwq_phy, 31, 0))
       :execute()
    local rqn = self:output(0x08, 23, 0)
-   return rqn, rqmem
+   return RQ:new(rqn, rwq, doorbell)
+end
+
+RQ = {}
+
+function RQ:new (rqn, rwq, doorbell)
+   return setmetatable({rqn = rqn, rwq = rwq, doorbell = doorbell},
+      {__index = RQ})
 end
 
 -- Modify a Receive Queue by making a state transition.
@@ -466,8 +474,10 @@ end
 
 -- Create a Send Queue.
 -- Return the send queue number and a pointer to the WQEs.
-function HCA:create_sq (tis, cqn, uar, pd, db_phy, sqmem)
-   local wqphy = memory.virtual_to_physical(sqmem)
+function HCA:create_sq (cqn, pd, size, doorbell, swq, tis)
+   local log_wq_size = log2size(size)
+   local db_phy = memory.virtual_to_physical(doorbell)
+   local swq_phy = memory.virtual_to_physical(swq)
    self:command("CREATE_SQ", 0x20 + 0x30 + 0xC4, 0x0C)
       :input("opcode",         0x00,               31, 16, 0x904)
       :input("rlkey",          0x20 + 0x00,        31, 31, 1)
@@ -479,17 +489,23 @@ function HCA:create_sq (tis, cqn, uar, pd, db_phy, sqmem)
       :input("tis",            0x20 + 0x2C,        23, 0, tis)
       :input("wq_type",        0x20 + 0x30 + 0x00, 31, 28, 1) -- cyclic
       :input("pd",             0x20 + 0x30 + 0x08, 23, 0, pd)
-      :input("uar_page",       0x20 + 0x30 + 0x0C, 23, 0, uar)
       :input("pas[0] high",    0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
       :input("pas[0] low",     0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
       :input("log_wq_stride",  0x20 + 0x30 + 0x20, 19, 16, 6)
       :input("log_wq_page_sz", 0x20 + 0x30 + 0x20, 12, 8,  6) -- XXX check
-      :input("log_wq_size",    0x20 + 0x30 + 0x20, 4,  0,  10) -- XXX make configurable
-      :input("pas[0] high",    0x20 + 0x30 + 0xC0, 31, 0, ptrbits(wqphy, 63, 32))
-      :input("pas[0] low",     0x20 + 0x30 + 0xC4, 31, 0, ptrbits(wqphy, 31, 0))
+      :input("log_wq_size",    0x20 + 0x30 + 0x20, 4,  0,  log_wq_size)
+      :input("pas[0] high",    0x20 + 0x30 + 0xC0, 31, 0, ptrbits(swq_phy, 63, 32))
+      :input("pas[0] low",     0x20 + 0x30 + 0xC4, 31, 0, ptrbits(swq_phy, 31, 0))
       :execute()
    local sqn = self:output(0x08, 23, 0)
-   return sqn, sqmem
+   return SQ:new(sqn, swq, doorbell)
+end
+
+SQ = {}
+
+function SQ:new (sqn, swq, doorbell)
+   return setmetatable({sqn = sqn, swq = swq, doorbell = doorbell},
+      {__index = SQ})
 end
 
 NIC_RX = 0 -- Flow table type code for incoming packets
@@ -598,8 +614,6 @@ function HCA:set_port_loopback (loopback_mode)
       :input("loopback_mode", 0x14,  7,  0, loopback_mode and 2 or 0)
       :execute()
 end
-
-
 
 ---------------------------------------------------------------
 -- Command Interface implementation.
@@ -988,322 +1002,75 @@ function ConnectX4:new (arg)
    local pciaddress = pci.qualified(conf.pciaddress)
 
    -- Perform a hard reset of the device to bring it into a blank state.
-   -- (PRM does not suggest this but it is practical for resetting the
-   -- firmware from bad states.)
+   --
+   -- Reset is performed at PCI level instead of via firmware command.
+   -- This is intended to be robust to problems like bad firmware states.
    pci.unbind_device_from_linux(pciaddress)
    pci.reset_device(pciaddress)
    pci.set_bus_master(pciaddress, true)
+
+   -- Setup the command channel
+   --
    local base, fd = pci.map_pci_memory(pciaddress, 0, true)
-
-   trace("Read the initialization segment")
    local init_seg = InitializationSegment:new(base)
-
-   --allocate and set the command queue which also initializes the nic
    local hca = HCA:new(init_seg)
-
-   --8.2 HCA Driver Start-up
 
    trace("Write the physical location of the command queues to the init segment.")
    init_seg:cmdq_phy_addr(memory.virtual_to_physical(hca.entry))
-
-   --trace("Teardown (graceful mode) to reset NIC")
-   --[[
-   cmdq:teardown_hca(1)
-   cmdq:disable_hca()
-   debug = false
-   while true do
-      local flushed = cmdq:flush_pages()
-      print("flushed "..flushed)
-      if flushed == 0 then break end
-   end
-   --C.usleep(10000)
-   cmdq:disable_hca()
-   --]]
-
+   if debug_trace then init_seg:dump() end
    trace("Wait for the 'initializing' field to clear")
    while not init_seg:ready() do
       C.usleep(1000)
    end
 
-   init_seg:dump()
-
+   -- Boot the card
+   --
    hca:enable_hca()
-   --local issi = hca:query_issi()
-   --hca:dump_issi(issi)
-
-   --os.exit(0)
    hca:set_issi(1)
+   hca:alloc_pages(hca:query_pages("boot"))
+   if debug_trace then self:dump_capabilities() end
 
-   -- PRM: Execute QUERY_PAGES to understand the HCA need to boot pages.
-   local boot_pages = hca:query_pages'boot'
-   print("query_pages'boot'       ", boot_pages)
-   assert(boot_pages > 0)
-
-   -- PRM: Execute MANAGE_PAGES to provide the HCA with all required
-   -- init-pages. This can be done by multiple MANAGE_PAGES commands.
-   for i = 1, 10 do
-      hca:alloc_pages(boot_pages)
-   end
-
-   local cur = hca:query_hca_general_cap('current')
-   local max = hca:query_hca_general_cap('max')
-   print'Capabilities - current and (maximum):'
-   for k in pairs(cur) do
-      print(("  %-24s = %-3s (%s)"):format(k, cur[k], max[k]))
-   end
-
-   -- Initialization pages
-   local init_pages = hca:query_pages('init')
-   print("query_pages'init'       ", init_pages)
-   assert(init_pages > 0)
-
-   for i = 1, 4 do
-      local n = init_pages
-      while n > 0 do
-         local c = 500
-         hca:alloc_pages(math.min(n, c))
-         n = n - c
-      end
-   end
-
-   --print("OUT")
-   --os.exit(33)
-
-   --[[
-   for i = 1, 4 do
-      hca:alloc_pages(init_pages)
-   end
-   --]]
-
+   -- Initialize the card
+   --
+   hca:alloc_pages(hca:query_pages("init"))
    hca:init_hca()
+   hca:alloc_pages(hca:query_pages("regular"))
 
-   --os.exit(1)
+   if debug_trace then self:check_vport() end
 
-   --debug = false
-   --print("LOOPBACK:", hca:get_port_loopback_capability(1))
-   --hca:enable_loopback_mode(1, true)
-
-   local eq_uar = hca:alloc_uar()
-
-   local eq = hca:create_eq(eq_uar, 1)
-   print("eq               = " .. eq.eqn)
-
-   local vport_ctx = hca:query_nic_vport_context()
-   for k,v in pairs(vport_ctx) do
-      print(k,v)
-   end
-
-   local vport_state = hca:query_vport_state()
-   for k,v in pairs(vport_state) do
-      print(k,v)
-   end
-
-   local tdomain = hca:alloc_transport_domain()
-   print("transport domain = " .. tdomain)
-
-   local tis = hca:create_tis(0, tdomain)
-   print("tis              = " .. tis)
-
+   -- Create basic objects that we need
+   --
    local uar = hca:alloc_uar()
-   print("uar              = " .. uar)
-
-   local rlkey = hca:query_rlkey()
-   print("reserved lkey    = " .. rlkey)
+   local eq = hca:create_eq(uar)
    local pd = hca:alloc_protection_domain()
-   print("protection dom.  = " .. pd)
+   local tdomain = hca:alloc_transport_domain()
+   local rlkey = hca:query_rlkey()
 
-   eq:poll()
+   -- Create send and receive queues & associated objects
+   --
+   local tis = hca:create_tis(0, tdomain)
+   local send_cq = hca:create_cq(1024, uar, eq.eqn)
+   local recv_cq = hca:create_cq(1024, uar, eq.eqn)
 
-   local db_ptr_cq, db_phy_cq = memory.dma_alloc(16)
-   local cq, cqes = hca:create_cq(1024, uar, eq.eqn, db_phy_cq)
-   print("cq               = " .. cq)
-   local db_sq, db_phy_sq = memory.dma_alloc(16)
-   -- Allocate rqmem and sqmem contiguously
-   local rqmem = memory.dma_alloc(64 * 2 * 1024, 4096)
-   local sqmem = rqmem + 64 * 1024
-   --local sqmem = memory.dma_alloc(64*1024, 4096)
-   --local rqmem = memory.dma_alloc(64*1024, 4096)
+   -- Allocate work queue memory (receive & send contiguous in memory)
+   local wq_doorbell = memory.dma_alloc(16)
+   local qsize = 1024
+   local workqueues = memory.dma_alloc(64*qsize * 2, 4096)
+   local rwq = workqueues            -- receive work queue
+   local swq = workqueues + 64*qsize -- send work queue
 
-   local sq, wq = hca:create_sq(tis, cq, uar, pd, db_phy_sq, sqmem)
-   hca:modify_sq(sq, 0, 1)
-   print("sq               = " .. sq)
+   -- Create the queue objects
+   local sq = hca:create_sq(send_cq.cqn, pd, qsize, wq_doorbell, swq, tis)
+   local rq = hca:create_rq(recv_cq.cqn, pd, qsize, wq_doorbell, rwq)
+   local tir = hca:create_tir_direct(rq.rqn, tdomain)
 
-   eq:poll()
-   local db_ptr_rcq, db_phy_rcq = memory.dma_alloc(16)
-   local rcq, rcqes = hca:create_cq(1024, uar, eq.eqn, db_phy_rcq)
-   eq:poll()
-   local rq, rwq = hca:create_rq(rcq, 0, uar, pd, db_phy_sq, rqmem)
-   print("rq               = " .. rq .. "("..bit.tohex(rq)..")")
-   hca:modify_rq(rq, 0, 1)
-
-   local tir = hca:create_tir_direct(rq, tdomain)
-
-   local rx_table_id = hca:create_root_flow_table(NIC_RX)
-   --local tx_table_id = hca:create_root_flow_table('send')
-   print("rx_flow_table    = " .. rx_table_id)
-   --print("tx_flow_table    = " .. tx_table_id)
-   local group_id = hca:create_flow_group_wildcard(rx_table_id, NIC_RX, 0, 0)
-   hca:set_flow_table_entry_wildcard(rx_table_id, NIC_RX, group_id, 0, tir)
-   hca:set_flow_table_root(rx_table_id, NIC_RX)
-
-   print("Creating send queue entries")
-
-   -- 64B Work Queue Entry (WQE)
-   local wq_db_t = ffi.typeof("struct { uint32_t receive, send; } *")
-   local wqe_t = ffi.typeof([[union {
-                                uint8_t  u8[64];
-                                uint32_t u32[16];
-                                uint64_t u64[8];
-                             } *]])
-   local wqes = ffi.cast(wqe_t, wq)
-   -- Create the send WQEs
-   local nsend = 10
-   for i = 0, nsend-1 do
-      local wqe = wqes[i]
-      local p = packet.allocate()
-      p.length = 80
-      
-      ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
-      p.data[11] = i            -- last octet of smac = packet#
-      p.data[12] = 0xff         -- ethertype = 0xFF00
-      ffi.fill(p.data+14, p.length-14, i) -- payload = packet #
-      
-      ffi.fill(p.data, p.length, 0xff)
-      -- 16B control segment
-      wqe.u32[0] = bswap(shl(i, 8) + 0x0A)
-      wqe.u32[1] = bswap(shl(sq, 8) + 4)
-      wqe.u32[2] = bswap(shl(2, 2)) -- completion always
-      -- 32B ethernet segment (partial inline header)
-      local ninline = 16
-      wqe.u32[7] = bswap(shl(ninline, 16))         -- 20 byte inline header
-      ffi.copy(wqe.u8 + 0x1E, p.data, ninline) -- inline headers
-      -- 16B send data segment (DMA pointer)
-      wqe.u32[12] = bswap(p.length - ninline)
-      wqe.u32[13] = bswap(rlkey)
-      local phy = memory.virtual_to_physical(p.data + ninline)
-      wqe.u32[14] = bswap(tonumber(phy) / 2^32)
-      wqe.u32[15] = bswap(tonumber(phy) % 2^32)
-      print("size", bswap(wqe.u32[12]))
-      print("lkey", bswap(wqe.u32[13]))
-      print("high", bit.tohex(bswap(wqe.u32[14])))
-      print("low",  bit.tohex(bswap(wqe.u32[15])))
-   end
-
-   --local cq_ci = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x20)
-   --cq_ci[0] = 0
-
-   print("waiting for link up")
-   while hca:query_vport_state().oper_state ~= 1 do
-      C.usleep(1e6)
-   end
-
-   eq:poll()
-
-   --print("Creating receive queue entries")
-
-   local rwqe_t = ffi.typeof[[
-     struct {
-       uint32_t length;
-       uint32_t lkey;
-       uint32_t address_high;
-       uint32_t address_low;
-     } *]]
-
-   local nrecv = nsend
-   local rwqes = ffi.cast(rwqe_t, rwq)
-   local rxpackets = {}
-   -- Create receive queue entries
-   for i = 0, nrecv-1 do
-      local p = packet.allocate()
-      local phy = memory.virtual_to_physical(p.data)
-      rwqes[i].length = bswap(10000) -- XXX sizeof packet
-      rwqes[i].lkey = bswap(rlkey)
-      rwqes[i].address_high = bswap(tonumber(phy) / 2^32)
-      rwqes[i].address_low  = bswap(tonumber(phy) % 2^32)
-      rxpackets[i] = p
-   end
-
-   print("Ringing send doorbell")
---   for i = 0, nsend-1 do
-      --C.full_memory_barrier()
-      --C.usleep(100)
-      -- Update doorbell record
-   db_sq = ffi.cast(wq_db_t, db_sq)
-   db_sq.send = bswap(nsend-1)
-   db_sq.receive = bswap(nrecv)
-   C.full_memory_barrier()
-   -- Ring doorbell in blue flame registers
-   local bf    = ffi.cast("uint64_t *",
-                          ffi.cast("uint8_t *", base) + (uar * 4096) + 0x800)
-   bf[0] = wqes[nsend-1].u64[0]
---   end
-
-   C.usleep(0.5e6)
-
-   for name, WQ in pairs({send=cqes, receive=rcqes}) do
-      print("Scanning send completion queue: " .. name)
-      local cq_wqe = ffi.cast(wqe_t, WQ)
-      for i = 0, nsend do
-         local opcodes = { [0] = 'requester', [1] = 'responder', [13] = 'requester error', [14] = 'responder error', [15] = 'invalid CQE'}
-         local opcode = shr(cq_wqe[i].u8[0x3F], 4)
-         local wqe_counter = shr(bswap(cq_wqe[i].u32[0x3C/4]), 16)
-         local len = bswap(cq_wqe[i].u32[0x2C/4])
-         print(("CQE[%03d]: WQE=%05d len=%d %2d (%s)"):format(i, wqe_counter, len, opcode, opcodes[opcode]))
-         if opcode == 2 then
-            print("packet dump:")
-            print(lib.hexdump(ffi.string(rxpackets[wqe_counter].data, len)))
-         end
-         if opcode ~= 0 and opcode ~= 2 then
-            local syndromes = {
-               [0x1] = "Local_Length_Error",
-               [0x4] = "Local_Protection_Error",
-               [0x5] = "Work_Request_Flushed_Error",
-               [0x6] = "Memory_Window_Bind_Error",
-               [0x10] = "Bad_Response_Error",
-               [0x11] = "Local_Access_Error",
-               [0x12] = "Remote_Invalid_Request_Error",
-               [0x13] = "Remote_Access_Error",
-               [0x14] = "Remote_Operation_Error"
-            }
-            local syndrome = cq_wqe[i].u8[0x37]
-            print(("          syndrome = 0x%x (%s)"):format(syndrome, syndromes[syndromes]))
-         end
-      end
-   end
-
-   eq:poll()
-
-   print("Send CQ")
-   hexdump(cqes, 0, 64)
-   print("Recv CQ")
-   hexdump(rcqes, 0, 64)
-   --print(lib.hexdump(ffi.string(cqes, 64)))
-   print("CQ doorbell")
-   hexdump(db_ptr_cq, 0, 64)
-   print("SQ doorbell")
-   hexdump(db_sq, 0, 64)
-   print("SQ[0]")
-   hexdump(wq, 0, 64)
-
-   debug = false
-
-   hca:query_vport_counter()
-   print("Finished test") io.flush()
-
-   eq:poll()
-
-   os.exit(0)
-
-   --[[
-   hca:set_hca_cap()
-   hca:query_pages()
-   hca:manage_pages()
-   hca:init_hca()
-   hca:set_driver_version()
-   hca:create_eq()
-   hca:query_vport_state()
-   hca:modify_vport_context()
-   ]]
+   -- Setup packet dispatching.
+   -- Just a "wildcard" flow group to send RX packets to the receive queue.
+   --
+   local rx_flow_table_id = hca:create_root_flow_table(NIC_RX)
+   local flow_group_id = hca:create_flow_group_wildcard(rx_flow_table_id, NIC_RX, 0, 0)
+   hca:set_flow_table_entry_wildcard(rx_flow_table_id, NIC_RX, flow_group_id, 0, tir)
+   hca:set_flow_table_root(rx_flow_table_id, NIC_RX)
 
    function self:stop()
       pci.set_bus_master(pciaddress, false)
@@ -1313,6 +1080,31 @@ function ConnectX4:new (arg)
    end
 
    return self
+end
+
+function ConnectX4:dump_capabilities ()
+   if true then return end
+   -- Print current and maximum card capabilities.
+   -- XXX Check if we have any specific requirements that we need to
+   --     set and/or assert on.
+   local cur = self.hca:query_hca_general_cap('current')
+   local max = self.hca:query_hca_general_cap('max')
+   print'Capabilities - current and (maximum):'
+   for k in pairs(cur) do
+      print(("  %-24s = %-3s (%s)"):format(k, cur[k], max[k]))
+   end
+end
+
+function ConnectX4:check_vport ()
+   if true then return end
+   local vport_ctx = hca:query_nic_vport_context()
+   for k,v in pairs(vport_ctx) do
+      print(k,v)
+   end
+   local vport_state = hca:query_vport_state()
+   for k,v in pairs(vport_state) do
+      print(k,v)
+   end
 end
 
 function selftest ()
@@ -1401,3 +1193,10 @@ function setbits (hi, lo, value,  base)
    return bor(newbits, oldbits)
 end
 
+function log2size (size)
+   -- Return log2 of size rounded up to nearest whole number.
+   --
+   -- Note: Lua provides only natural logarithm function (base e) built-in.
+   --       See http://www.mathwords.com/c/change_of_base_formula.htm
+   return math.ceil(math.log(size) / math.log(2))
+end
