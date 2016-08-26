@@ -10,12 +10,11 @@ local link      = require("core.link")
 local memory    = require("core.memory")
 local packet    = require("core.packet")
 local timer     = require("core.timer")
-local vq        = require("lib.virtio.virtq_device")
+local VirtioVirtq = require("lib.virtio.virtq_device")
 local checksum  = require("lib.checksum")
 local ffi       = require("ffi")
 local C         = ffi.C
 local band      = bit.band
-local get_buffers = vq.VirtioVirtq.get_buffers
 
 require("lib.virtio.virtio.h")
 require("lib.virtio.virtio_vring_h")
@@ -88,10 +87,10 @@ function VirtioNetDevice:new(owner, disable_mrg_rxbuf, disable_indirect_desc)
 
    for i = 0, max_virtq_pairs-1 do
       -- TXQ
-      o.virtq[2*i] = vq.VirtioVirtq:new()
+      o.virtq[2*i] = VirtioVirtq:new()
       o.virtq[2*i].device = o
       -- RXQ
-      o.virtq[2*i+1] = vq.VirtioVirtq:new()
+      o.virtq[2*i+1] = VirtioVirtq:new()
       o.virtq[2*i+1].device = o
    end
 
@@ -129,7 +128,7 @@ function VirtioNetDevice:receive_packets_from_vm ()
    for i = 0, self.virtq_pairs-1 do
       self.ring_id = 2*i+1
       local virtq = self.virtq[self.ring_id]
-      get_buffers(virtq, 'rx', ops, self.hdr_size)
+      virtq:get_buffers('rx', ops, self.hdr_size)
    end
 end
 
@@ -206,7 +205,7 @@ function VirtioNetDevice:transmit_packets_to_vm ()
    for i = 0, self.virtq_pairs-1 do
       self.ring_id = 2*i
       local virtq = self.virtq[self.ring_id]
-      get_buffers(virtq, 'tx', ops, self.hdr_size)
+      virtq:get_buffers('tx', ops, self.hdr_size)
    end
 end
 
@@ -490,6 +489,19 @@ feature_names = {
 
    [C.VIRTIO_NET_F_MQ]                          = "VIRTIO_NET_F_MQ"
 }
+
+function VirtioNetDevice:jitoptimize ()
+   local mod = "lib.virtio.virtq_device"
+   -- Load fresh copies of the virtq module: one for tx, one for rx.
+   local txvirtq = package.loaders[1](mod)(mod)
+   local rxvirtq = package.loaders[1](mod)(mod)
+   local tx_mt = {__index = txvirtq}
+   local rx_mt = {__index = rxvirtq}
+   for i = 0, max_virtq_pairs-1 do
+      setmetatable(self.virtq[2*i],   tx_mt)
+      setmetatable(self.virtq[2*i+1], rx_mt)
+   end
+end
 
 function get_feature_names(bits)
 local string = ""
