@@ -923,6 +923,7 @@ function cmdq:query_vport_counter()
       local n = self:getoutbits(i, 31, 0)
       if n > 0 then print(bit.tohex(i), n) end
    end
+   return self:getoutbits(0x84, 31, 0)
 end
 
 function cmdq:modify_vport_state(admin_state)
@@ -1013,9 +1014,9 @@ function cmdq:create_cq(entries, uar_page, eq, db_phy)
    self:setinbits(0x10 + 0,
                   31, 28, 0, -- status
                   23, 21, 0, -- cqe_sz (64 bytes)
-                  20, 20, 0, -- cc (collapse events)
+                  20, 20, 1, -- cc (collapse events)
                   18, 18, 0, -- scqe_break_moderation_en
-                  17, 17, 0, -- oi: override ignore
+                  17, 17, 1, -- oi: override ignore
                   16, 15, 0, -- cq_period_mode
                   14, 14, 0, -- cq_compression_en
                   13, 12, 0, -- mini_cqe_res_format
@@ -1115,7 +1116,7 @@ function cmdq:create_sq(tis, cqn, user_index, uar, pd, db_phy, sqmem)
    self:setinbits(0x20 + 0x30 + 0x20,
                   19, 16, 6,     -- log_wq_stride
                   12, 8,  0xF,   -- log_wq_pg_sz = 0xF (max)
-                  4,  0,  10)    -- log_wq_sz (1024 x 64 byte entries)
+                  4,  0,  14)    -- log_wq_sz
    local wqphy = memory.virtual_to_physical(sqmem)
    self:setinbits(0x20 + 0x30 + 0xC0, 31, 0, ptrbits(wqphy, 63, 32))
    self:setinbits(0x20 + 0x30 + 0xC4, 31, 0, ptrbits(wqphy, 31, 0))
@@ -1468,7 +1469,8 @@ function ConnectX4:new(arg)
    local db_sq, db_phy_sq = memory.dma_alloc(16)
    -- Allocate rqmem and sqmem contiguously
    local rqmem = memory.dma_alloc(64 * 2 * 1024, 4096)
-   local sqmem = rqmem + 64 * 1024
+   --local sqmem = rqmem + 64 * 1024
+   local sqmem = memory.dma_alloc(64 * 32 * 1024)
    --local sqmem = memory.dma_alloc(64*1024, 4096)
    --local rqmem = memory.dma_alloc(64*1024, 4096)
 
@@ -1505,22 +1507,27 @@ function ConnectX4:new(arg)
                              } *]])
    local wqes = ffi.cast(wqe_t, wq)
    -- Create the send WQEs
-   local nsend = 10
+   --local nsend = 22500
+   local nsend = 16*1024
+
+   local p = packet.allocate()
+   p.length = 80
+   
+   ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
+   p.data[11] = 1            -- last octet of smac = packet#
+   p.data[12] = 0xff         -- ethertype = 0xFF00
+   ffi.fill(p.data+14, p.length-14, 0xFF) -- payload = packet #
+   
+   ffi.fill(p.data, p.length, 0xff)
+
    for i = 0, nsend-1 do
       local wqe = wqes[i]
-      local p = packet.allocate()
-      p.length = 80
-      
-      ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
-      p.data[11] = i            -- last octet of smac = packet#
-      p.data[12] = 0xff         -- ethertype = 0xFF00
-      ffi.fill(p.data+14, p.length-14, i) -- payload = packet #
-      
-      ffi.fill(p.data, p.length, 0xff)
       -- 16B control segment
       wqe.u32[0] = bswap(shl(i, 8) + 0x0A)
       wqe.u32[1] = bswap(shl(sq, 8) + 4)
-      wqe.u32[2] = bswap(shl(2, 2)) -- completion always
+      if i % 4096 == 0 then
+         wqe.u32[2] = bswap(shl(2, 2)) -- completion always
+      end
       -- 32B ethernet segment (partial inline header)
       local ninline = 16
       wqe.u32[7] = bswap(shl(ninline, 16))         -- 20 byte inline header
@@ -1531,10 +1538,12 @@ function ConnectX4:new(arg)
       local phy = memory.virtual_to_physical(p.data + ninline)
       wqe.u32[14] = bswap(tonumber(phy) / 2^32)
       wqe.u32[15] = bswap(tonumber(phy) % 2^32)
+      --[[
       print("size", bswap(wqe.u32[12]))
       print("lkey", bswap(wqe.u32[13]))
       print("high", bit.tohex(bswap(wqe.u32[14])))
       print("low",  bit.tohex(bswap(wqe.u32[15])))
+      ]]--
    end
 
    --local cq_ci = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x20)
@@ -1581,17 +1590,53 @@ function ConnectX4:new(arg)
    db_sq.receive = bswap(nrecv)
    C.full_memory_barrier()
    -- Ring doorbell in blue flame registers
-   local bf    = ffi.cast("uint64_t *",
-                          ffi.cast("uint8_t *", base) + (uar * 4096) + 0x800)
-   bf[0] = wqes[nsend-1].u64[0]
---   end
+   local bf0odd  = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x800)
+   local bf0even = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x900)
+   local cqe = ffi.cast("uint32_t*", cqes)
+   -- Loop refreshing the WQEs
+   local index = 0
+   local lib = require("core.lib")
+   local bf_a, bf_b = bf0even, bf0odd
+   bf_a[0] = wqes[nsend-1].u64[0]
+   local start = C.get_time_ns()
+   for i = 0, 1000000000 do
+      local last = shr(bswap(cqe[0x3C/4]), 16) % (16*1024)
+      local opcode = ffi.cast("uint8_t*", cqe)[0x3F]
+      --if opcode ~= 0 then error("bad opcode: " .. opcode) end
+      if last ~= index then
+         --print("->", index, last)
+         while index ~= last do
+            -- Bump WQE index by 16384
+            wqes[index].u8[1] = wqes[index].u8[1] + 64
+            index = ((index + 1) % (16*1024))
+         end
+         local ix = (index-1)%(16*1024)
+         --print("ringing "..ix)
+         bf_a, bf_b = bf_b, bf_a -- swap
+         bf_a[0] = wqes[ix].u64[0]
+         lib.compiler_barrier()
+      end
+      lib.compiler_barrier()
+   end
+   local finish = C.get_time_ns()
+   local packets = cmdq:query_vport_counter()
+   print(("Processed %fM packets in %f seconds (%f Mpps)"):format(
+             packets/1e6,
+             tonumber(finish-start)/1e9,
+             packets * 1000 / tonumber(finish-start)))
+   --[[
+   for i = 1, 100000 do
+      bf0odd[0]  = wqes[0].u64[0]
+      bf0even[0] = wqes[512].u64[0]
+   end
+   --]]
 
    C.usleep(0.5e6)
 
    for name, WQ in pairs({send=cqes, receive=rcqes}) do
       print("Scanning send completion queue: " .. name)
       local cq_wqe = ffi.cast(wqe_t, WQ)
-      for i = 0, nsend do
+      for i = 0, 0 do
          local opcodes = { [0] = 'requester', [1] = 'responder', [13] = 'requester error', [14] = 'responder error', [15] = 'invalid CQE'}
          local opcode = shr(cq_wqe[i].u8[0x3F], 4)
          local wqe_counter = shr(bswap(cq_wqe[i].u32[0x3C/4]), 16)
@@ -1614,7 +1659,7 @@ function ConnectX4:new(arg)
                [0x14] = "Remote_Operation_Error"
             }
             local syndrome = cq_wqe[i].u8[0x37]
-            print(("          syndrome = 0x%x (%s)"):format(syndrome, syndromes[syndromes]))
+            print(("          syndrome = 0x%x (%s)"):format(syndrome, syndromes[syndrome]))
          end
       end
    end
@@ -1674,6 +1719,7 @@ end
 -- trace starts (useful when printing multiple related hexdumps i.e.
 -- for consistency with the Linux mlx5_core driver format).
 function hexdump (pointer, index, bytes,  dumpoffset)
+   if true then return end
    local u8 = ffi.cast("uint8_t*", pointer)
    dumpoffset = dumpoffset or 0
    for i = 0, bytes-1 do
