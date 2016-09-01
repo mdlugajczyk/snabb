@@ -61,6 +61,8 @@
 --        card and firmware being used for initial development is not
 --        asking the driver to identify itself anyway.)
 
+local qsize = tonumber(os.getenv("SNABB_QSIZE"))
+local log_qsize = math.log(qsize) / math.log(2)
 
 module(...,package.seeall)
 
@@ -1116,7 +1118,7 @@ function cmdq:create_sq(tis, cqn, user_index, uar, pd, db_phy, sqmem)
    self:setinbits(0x20 + 0x30 + 0x20,
                   19, 16, 6,     -- log_wq_stride
                   12, 8,  0xF,   -- log_wq_pg_sz = 0xF (max)
-                  4,  0,  14)    -- log_wq_sz
+                  4,  0,  log_qsize)    -- log_wq_sz
    local wqphy = memory.virtual_to_physical(sqmem)
    self:setinbits(0x20 + 0x30 + 0xC0, 31, 0, ptrbits(wqphy, 63, 32))
    self:setinbits(0x20 + 0x30 + 0xC4, 31, 0, ptrbits(wqphy, 31, 0))
@@ -1508,10 +1510,10 @@ function ConnectX4:new(arg)
    local wqes = ffi.cast(wqe_t, wq)
    -- Create the send WQEs
    --local nsend = 22500
-   local nsend = 16*1024
+   local nsend = qsize
 
    local p = packet.allocate()
-   p.length = 80
+   p.length = tonumber(os.getenv("SNABB_PKTSIZE"))
    
    ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
    p.data[11] = 1            -- last octet of smac = packet#
@@ -1525,7 +1527,7 @@ function ConnectX4:new(arg)
       -- 16B control segment
       wqe.u32[0] = bswap(shl(i, 8) + 0x0A)
       wqe.u32[1] = bswap(shl(sq, 8) + 4)
-      if i % 4096 == 0 then
+      if i % 256 == 0 then
          wqe.u32[2] = bswap(shl(2, 2)) -- completion always
       end
       -- 32B ethernet segment (partial inline header)
@@ -1600,17 +1602,18 @@ function ConnectX4:new(arg)
    bf_a[0] = wqes[nsend-1].u64[0]
    local start = C.get_time_ns()
    for i = 0, 1000000000 do
-      local last = shr(bswap(cqe[0x3C/4]), 16) % (16*1024)
+      local last = shr(bswap(cqe[0x3C/4]), 16) % qsize
       local opcode = ffi.cast("uint8_t*", cqe)[0x3F]
       --if opcode ~= 0 then error("bad opcode: " .. opcode) end
       if last ~= index then
          --print("->", index, last)
          while index ~= last do
             -- Bump WQE index by 16384
-            wqes[index].u8[1] = wqes[index].u8[1] + 64
-            index = ((index + 1) % (16*1024))
+            local bump = (256 * qsize / (64*1024))
+            wqes[index].u8[1] = wqes[index].u8[1] + bump
+            index = ((index + 1) % qsize)
          end
-         local ix = (index-1)%(16*1024)
+         local ix = (index-1)%qsize
          --print("ringing "..ix)
          bf_a, bf_b = bf_b, bf_a -- swap
          bf_a[0] = wqes[ix].u64[0]
