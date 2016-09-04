@@ -34,6 +34,16 @@ function gbits (bps)
 end
 
 function basic1 (npackets)
+   local pmu = require("lib.pmu")
+   local events = ({--"^uops_retired.all$",
+                    "^mem_load_uops_retired.l1_hit$",
+                    "^mem_load_uops_retired.l2_hit$",
+                    "^mem_load_uops_retired.l3_hit$",
+                    "^mem_load_uops_retired.l3_miss$",
+                    --"^icache.misses$",
+                    --"^dtlb_load_misses.miss_causes_a_walk$",
+                    --"^br_misp_exec.all_branches$"
+                  })
    npackets = tonumber(npackets) or error("Invalid number of packets: " .. npackets)
    local c = config.new()
    -- Simple topology:
@@ -51,12 +61,16 @@ function basic1 (npackets)
    engine.configure(c)
    local start = C.get_monotonic_time()
    timer.activate(timer.new("null", function () end, 1e6, 'repeating'))
-   while link.stats(engine.app_table.Source.output.tx).txpackets < npackets do
-      engine.main({duration = 0.01, no_report = true})
+   local f = function ()
+      while link.stats(engine.app_table.Source.output.tx).txpackets < npackets do
+         engine.main({duration = 0.01, no_report = true})
+      end
    end
+   local _, profile = pmu.measure(f, events)
    local finish = C.get_monotonic_time()
    local runtime = finish - start
    local packets = link.stats(engine.app_table.Source.output.tx).txpackets
+   pmu.report(profile, {packet=packets})
    engine.report()
    print()
    print(("Processed %.1f million packets in %.2f seconds (rate: %.1f Mpps)."):format(packets / 1e6, runtime, packets / runtime / 1e6))

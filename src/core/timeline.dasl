@@ -9,6 +9,8 @@ local C = ffi.C
 local S = require("syscall")
 local shm = require("core.shm")
 
+local pmc = true
+
 ------------------------------------------------------------
 -- Binary data structures
 
@@ -22,6 +24,13 @@ ffi.cdef[[
     uint32_t reserved;               // (pad to 64 bytes)
     uint64_t msg_id;                 // category:24, message:24, priority:16
     uint64_t msg0, msg1, msg2, msg3; // message arguments
+  };
+  struct timeline_entry_pmc {
+    uint64_t cookie;          // 0xFFFFFFFFFFFFFFFF (-1)
+    uint32_t fixed0, fixed1, fixed2,
+             general0, general1, general2, general3,
+             general4, general5, general6, general7;
+    uint8_t pad[12];
   };
 ]]
 
@@ -227,6 +236,7 @@ end
 
 |.type log, struct timeline_header
 |.type msg, struct timeline_entry
+|.type pmc, struct timeline_entry_pmc
 local function asmlog (Dst)
    |->log:
    -- Exit if this log message is disabled
@@ -235,6 +245,63 @@ local function asmlog (Dst)
    | jnz >1
    | ret
    |1:
+
+   if pmc then
+      | push arg2
+      | push arg3
+      -- Load and advance next log entry index
+      | mov r11, log:arg0->next
+      | mov rax, r11
+      | add rax, 1
+      | and rax, log:arg0->last
+      | mov log:arg0->next, rax
+
+      -- Convert log entry number to pointer
+      | shl r11, 6
+      | lea r10, log:arg0->entries
+      | add r10, r11
+
+      -- Log cookie that identifies PMC record
+      | mov rcx, -1
+      | mov pmc:r10->cookie, rcx
+      -- Log fixed-function performance counters
+      | mov ecx, 0x40000000
+      | rdpmc
+      | mov pmc:r10->fixed0, eax
+      | mov ecx, 0x40000001
+      | rdpmc
+      | mov pmc:r10->fixed1, eax
+      | mov ecx, 0x40000002
+      | rdpmc
+      | mov pmc:r10->fixed2, eax
+      -- Log general-purpose performance counters
+      | mov ecx, 0x00000000
+      | rdpmc
+      | mov pmc:r10->general0, eax
+      | mov ecx, 0x00000001
+      | rdpmc
+      | mov pmc:r10->general1, eax
+      | mov ecx, 0x00000002
+      | rdpmc
+      | mov pmc:r10->general2, eax
+      | mov ecx, 0x00000003
+      | rdpmc
+      | mov pmc:r10->general3, eax
+      | mov ecx, 0x00000004
+      | rdpmc
+      | mov pmc:r10->general4, eax
+      | mov ecx, 0x00000005
+      | rdpmc
+      | mov pmc:r10->general5, eax
+      | mov ecx, 0x00000006
+      | rdpmc
+      | mov pmc:r10->general6, eax
+      | mov ecx, 0x00000007
+      | rdpmc
+      | mov pmc:r10->general7, eax
+      | pop arg3
+      | pop arg2
+   end
 
    -- Load and advance next log entry index
    | mov r11, log:arg0->next
@@ -277,7 +344,7 @@ event = ffi.cast("void(*)(struct timeline_header *, uint64_t, uint64_t, uint64_t
 
 _anchor = mcode
 
---dasm.dump(mcode, size)
+dasm.dump(mcode, size)
 
 function selftest ()
    print("selftest: timeline")
