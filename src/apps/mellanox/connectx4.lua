@@ -86,6 +86,8 @@ local debug = true
 ConnectX4 = {}
 ConnectX4.__index = ConnectX4
 
+local nsendqueues = tonumber(os.getenv("SNABB_SENDQS"))
+
 --utils
 
 local function alloc_pages(pages)
@@ -531,22 +533,6 @@ function cmdq:query_pages(which)
    self:setinbits(0x04, 15, 0, codes[which])
    self:post(0x0C, 0x0C)
    return self:getoutbits(0x0C, 31, 0)
-end
-
-function cmdq:flush_pages()
-   self:prepare("MANAGE_PAGES", 0x10, 0x80C)
-   self:setinbits(0x00, 31, 16, MANAGE_PAGES)
-   self:setinbits(0x04, 15, 0, 2) -- return pages
-   self:setinbits(0x0C, 31, 0, 100)
-   --[[
-   for i=0, num_pages-1 do
-      local _, phy = memory.dma_alloc(4096, 4096)
-      self:setinbits(0x10 + i*8, 31,  0, ptrbits(phy, 63, 32))
-      self:setinbits(0x14 + i*8, 31, 12, ptrbits(phy, 31, 12))
-   end
-   ]]--
-   self:post(0x10, 0x80C)
-   return self:getoutbits(0x08, 31, 0)
 end
 
 function cmdq:alloc_pages(num_pages)
@@ -1465,41 +1451,6 @@ function ConnectX4:new(arg)
 
    eq:poll()
 
-   local db_ptr_cq, db_phy_cq = memory.dma_alloc(16)
-   local cq, cqes = cmdq:create_cq(1024, uar, eq.eqn, db_phy_cq)
-   print("cq               = " .. cq)
-   local db_sq, db_phy_sq = memory.dma_alloc(16)
-   -- Allocate rqmem and sqmem contiguously
-   local rqmem = memory.dma_alloc(64 * 2 * 1024, 4096)
-   --local sqmem = rqmem + 64 * 1024
-   local sqmem = memory.dma_alloc(64 * 32 * 1024)
-   --local sqmem = memory.dma_alloc(64*1024, 4096)
-   --local rqmem = memory.dma_alloc(64*1024, 4096)
-
-   local sq, wq = cmdq:create_sq(tis, cq, 11, uar, pd, db_phy_sq, sqmem, mkey)
-   cmdq:modify_sq(sq, 0, 1)
-   print("sq               = " .. sq)
-
-   eq:poll()
-   local db_ptr_rcq, db_phy_rcq = memory.dma_alloc(16)
-   local rcq, rcqes = cmdq:create_cq(1024, uar, eq.eqn, db_phy_rcq)
-   eq:poll()
-   local rq, rwq = cmdq:create_rq(rcq, 0, uar, pd, db_phy_sq, rqmem)
-   print("rq               = " .. rq .. "("..bit.tohex(rq)..")")
-   cmdq:modify_rq(rq, 0, 1)
-
-   local tir = cmdq:create_tir(rq, tdomain)
-
-   local rx_table_id = cmdq:create_root_flow_table('receive')
-   --local tx_table_id = cmdq:create_root_flow_table('send')
-   print("rx_flow_table    = " .. rx_table_id)
-   --print("tx_flow_table    = " .. tx_table_id)
-   local group_id = cmdq:create_flow_group_wildcard(rx_table_id, 'receive', 0, 0)
-   cmdq:set_flow_table_entry_simple(rx_table_id, 'receive', group_id, 0, tir)
-   cmdq:set_flow_table_root(rx_table_id, 'receive')
-
-   print("Creating send queue entries")
-
    -- 64B Work Queue Entry (WQE)
    local wq_db_t = ffi.typeof("struct { uint32_t receive, send; } *")
    local wqe_t = ffi.typeof([[union {
@@ -1507,45 +1458,71 @@ function ConnectX4:new(arg)
                                 uint32_t u32[16];
                                 uint64_t u64[8];
                              } *]])
-   local wqes = ffi.cast(wqe_t, wq)
-   -- Create the send WQEs
-   --local nsend = 22500
+
+
    local nsend = qsize
 
-   local p = packet.allocate()
-   p.length = tonumber(os.getenv("SNABB_PKTSIZE"))
-   
-   ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
-   p.data[11] = 1            -- last octet of smac = packet#
-   p.data[12] = 0xff         -- ethertype = 0xFF00
-   ffi.fill(p.data+14, p.length-14, 0xFF) -- payload = packet #
-   
-   ffi.fill(p.data, p.length, 0xff)
+   local db_sq_k = {}
+   local cqes_k = {}
+   local wqes_k = {}
+   local cqe_k = {}
+   for k = 1, nsendqueues do
+      local db_ptr_cq, db_phy_cq = memory.dma_alloc(16)
+      local cq, cqes = cmdq:create_cq(1024, uar, eq.eqn, db_phy_cq)
+      cqes_k[k] = cqes
+      print("cq               = " .. cq)
+      local db_sq, db_phy_sq = memory.dma_alloc(16)
+      db_sq_k[k] = db_sq
+      -- Allocate rqmem and sqmem contiguously
+      local rqmem = memory.dma_alloc(64 * 2 * 1024, 4096)
+      --local sqmem = rqmem + 64 * 1024
+      local sqmem = memory.dma_alloc(64 * 32 * 1024)
+      --local sqmem = memory.dma_alloc(64*1024, 4096)
+      --local rqmem = memory.dma_alloc(64*1024, 4096)
 
-   for i = 0, nsend-1 do
-      local wqe = wqes[i]
-      -- 16B control segment
-      wqe.u32[0] = bswap(shl(i, 8) + 0x0A)
-      wqe.u32[1] = bswap(shl(sq, 8) + 4)
-      if i % 256 == 0 then
-         wqe.u32[2] = bswap(shl(2, 2)) -- completion always
+      local sq, wq = cmdq:create_sq(tis, cq, 11, uar, pd, db_phy_sq, sqmem, mkey)
+      cmdq:modify_sq(sq, 0, 1)
+      print("sq               = " .. sq)
+
+      print("Creating send queue entries")
+
+      local wqes = ffi.cast(wqe_t, wq)
+      wqes_k[k] = wqes
+      -- Create the send WQEs
+      --local nsend = 22500
+
+
+      for i = 0, nsend-1 do
+
+         local p = packet.allocate()
+         p.length = tonumber(os.getenv("SNABB_PKTSIZE"))
+
+         ffi.fill(p.data, 6, 0xFF) -- dmac = broadcast
+         p.data[11] = 1            -- last octet of smac = packet#
+         p.data[12] = 0xff         -- ethertype = 0xFF00
+         ffi.fill(p.data+14, p.length-14, 0xFF) -- payload = packet #
+
+         ffi.fill(p.data, p.length, 0xff)
+
+
+         local wqe = wqes[i]
+         -- 16B control segment
+         wqe.u32[0] = bswap(shl(i, 8) + 0x0A)
+         wqe.u32[1] = bswap(shl(sq, 8) + 4)
+         if i % 256 == 0 then
+            wqe.u32[2] = bswap(shl(2, 2)) -- completion always
+         end
+         -- 32B ethernet segment (partial inline header)
+         local ninline = 16
+         wqe.u32[7] = bswap(shl(ninline, 16))         -- 20 byte inline header
+         ffi.copy(wqe.u8 + 0x1E, p.data, ninline) -- inline headers
+         -- 16B send data segment (DMA pointer)
+         wqe.u32[12] = bswap(p.length - ninline)
+         wqe.u32[13] = bswap(rlkey)
+         local phy = memory.virtual_to_physical(p.data + ninline)
+         wqe.u32[14] = bswap(tonumber(phy) / 2^32)
+         wqe.u32[15] = bswap(tonumber(phy) % 2^32)
       end
-      -- 32B ethernet segment (partial inline header)
-      local ninline = 16
-      wqe.u32[7] = bswap(shl(ninline, 16))         -- 20 byte inline header
-      ffi.copy(wqe.u8 + 0x1E, p.data, ninline) -- inline headers
-      -- 16B send data segment (DMA pointer)
-      wqe.u32[12] = bswap(p.length - ninline)
-      wqe.u32[13] = bswap(rlkey)
-      local phy = memory.virtual_to_physical(p.data + ninline)
-      wqe.u32[14] = bswap(tonumber(phy) / 2^32)
-      wqe.u32[15] = bswap(tonumber(phy) % 2^32)
-      --[[
-      print("size", bswap(wqe.u32[12]))
-      print("lkey", bswap(wqe.u32[13]))
-      print("high", bit.tohex(bswap(wqe.u32[14])))
-      print("low",  bit.tohex(bswap(wqe.u32[15])))
-      ]]--
    end
 
    --local cq_ci = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x20)
@@ -1558,68 +1535,56 @@ function ConnectX4:new(arg)
 
    eq:poll()
 
-   --print("Creating receive queue entries")
-
-   local rwqe_t = ffi.typeof[[
-     struct {
-       uint32_t length;
-       uint32_t lkey;
-       uint32_t address_high;
-       uint32_t address_low;
-     } *]]
-
-   local nrecv = nsend
-   local rwqes = ffi.cast(rwqe_t, rwq)
-   local rxpackets = {}
-   -- Create receive queue entries
-   for i = 0, nrecv-1 do
-      local p = packet.allocate()
-      local phy = memory.virtual_to_physical(p.data)
-      rwqes[i].length = bswap(10000) -- XXX sizeof packet
-      rwqes[i].lkey = bswap(rlkey)
-      rwqes[i].address_high = bswap(tonumber(phy) / 2^32)
-      rwqes[i].address_low  = bswap(tonumber(phy) % 2^32)
-      rxpackets[i] = p
-   end
-
-   print("Ringing send doorbell")
---   for i = 0, nsend-1 do
-      --C.full_memory_barrier()
-      --C.usleep(100)
-      -- Update doorbell record
-   db_sq = ffi.cast(wq_db_t, db_sq)
-   db_sq.send = bswap(nsend-1)
-   db_sq.receive = bswap(nrecv)
-   C.full_memory_barrier()
-   -- Ring doorbell in blue flame registers
    local bf0odd  = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x800)
    local bf0even = ffi.cast("uint64_t *", ffi.cast("uint8_t *", base) + (uar * 4096) + 0x900)
-   local cqe = ffi.cast("uint32_t*", cqes)
+   for k = 1, nsendqueues do
+      print("Ringing send doorbell "..k)
+      -- Update doorbell record
+      local db_sq = db_sq_k[k]
+      local cqes = cqes_k[k]
+      db_sq = ffi.cast(wq_db_t, db_sq)
+      db_sq.send = bswap(nsend-1)
+      --db_sq.receive = bswap(nrecv)
+      C.full_memory_barrier()
+      -- Ring doorbell in blue flame registers
+      local cqe = ffi.cast("uint32_t*", cqes)
+      cqe_k[k] = cqe
+   end
    -- Loop refreshing the WQEs
-   local index = 0
+   local index_k = {}
+   for k = 1, nsendqueues do
+      index_k[k] = 0
+   end
    local lib = require("core.lib")
    local bf_a, bf_b = bf0even, bf0odd
-   bf_a[0] = wqes[nsend-1].u64[0]
+   for k = 1, nsendqueues do
+      bf_a[0] = wqes_k[k][nsend-1].u64[0]
+   end
    local start = C.get_time_ns()
-   for i = 0, 1000000000 do
-      local last = shr(bswap(cqe[0x3C/4]), 16) % qsize
-      local opcode = ffi.cast("uint8_t*", cqe)[0x3F]
-      --if opcode ~= 0 then error("bad opcode: " .. opcode) end
-      if last ~= index then
-         --print("->", index, last)
-         while index ~= last do
-            -- Bump WQE index by 16384
-            local bump = (256 * qsize / (64*1024))
-            wqes[index].u8[1] = wqes[index].u8[1] + bump
-            index = ((index + 1) % qsize)
+   for i = 0, math.floor(10000000/nsendqueues) do
+      for k = 1, nsendqueues do
+         local db_sq = db_sq_k[k]
+         local cqes = cqes_k[k]
+         local wqes = wqes_k[k]
+         local cqe = cqe_k[k]
+         local index = index_k[k]
+         local last = shr(bswap(cqe[0x3C/4]), 16) % qsize
+         local opcode = ffi.cast("uint8_t*", cqe)[0x3F]
+         if last ~= index then
+            while index ~= last do
+               -- Bump WQE index by 16384
+               local bump = (256 * qsize / (64*1024))
+               wqes[index].u8[1] = wqes[index].u8[1] + bump
+               index = ((index + 1) % qsize)
+            end
+            local ix = (index-1)%qsize
+            bf_a[0] = wqes[ix].u64[0]
+            bf_a, bf_b = bf_b, bf_a -- swap
+            bf_a[0] = wqes[ix].u64[0]
+            index_k[k] = index
          end
-         local ix = (index-1)%qsize
-         --print("ringing "..ix)
-         bf_a, bf_b = bf_b, bf_a -- swap
-         bf_a[0] = wqes[ix].u64[0]
          lib.compiler_barrier()
       end
-      lib.compiler_barrier()
    end
    local finish = C.get_time_ns()
    local packets = cmdq:query_vport_counter()
@@ -1627,6 +1592,7 @@ function ConnectX4:new(arg)
              packets/1e6,
              tonumber(finish-start)/1e9,
              packets * 1000 / tonumber(finish-start)))
+   os.exit(0)
    --[[
    for i = 1, 100000 do
       bf0odd[0]  = wqes[0].u64[0]
