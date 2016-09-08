@@ -276,7 +276,7 @@ end
 -- This is to prevent leakage from one command to the next.
 local token = 0xAA
 function cmdq:prepare(command, last_input_offset, last_output_offset)
-   print("Command: " .. command)
+   if debug then print("Command: " .. command) end
    local input_size  = last_input_offset + 4
    local output_size = last_output_offset + 4
 
@@ -906,11 +906,13 @@ function cmdq:query_vport_counter()
    self:prepare("QUERY_VPORT_COUNTER", 0x1c, 0x20c)
    self:setinbits(0x00, 31, 16, 0x770)
    self:post(0x1C, 0x20c)
+--[[
    print("vport counters")
    for i = 0x10, 0x200, 4 do
       local n = self:getoutbits(i, 31, 0)
       if n > 0 then print(bit.tohex(i), n) end
    end
+--]]
    return self:getoutbits(0x84, 31, 0)
 end
 
@@ -1560,38 +1562,43 @@ function ConnectX4:new(arg)
    for k = 1, nsendqueues do
       bf_a[0] = wqes_k[k][nsend-1].u64[0]
    end
-   local start = C.get_time_ns()
-   for i = 0, math.floor(10000000/nsendqueues) do
-      for k = 1, nsendqueues do
-         local db_sq = db_sq_k[k]
-         local cqes = cqes_k[k]
-         local wqes = wqes_k[k]
-         local cqe = cqe_k[k]
-         local index = index_k[k]
-         local last = shr(bswap(cqe[0x3C/4]), 16) % qsize
-         local opcode = ffi.cast("uint8_t*", cqe)[0x3F]
-         if last ~= index then
-            while index ~= last do
-               -- Bump WQE index by 16384
-               local bump = (256 * qsize / (64*1024))
-               wqes[index].u8[1] = wqes[index].u8[1] + bump
-               index = ((index + 1) % qsize)
+   debug = false
+   local oldpackets = 0
+   while true do
+      local start = C.get_time_ns()
+      for i = 0, math.floor(100000000/nsendqueues) do
+         for k = 1, nsendqueues do
+            local db_sq = db_sq_k[k]
+            local cqes = cqes_k[k]
+            local wqes = wqes_k[k]
+            local cqe = cqe_k[k]
+            local index = index_k[k]
+            local last = shr(bswap(cqe[0x3C/4]), 16) % qsize
+            local opcode = ffi.cast("uint8_t*", cqe)[0x3F]
+            if last ~= index then
+               while index ~= last do
+                  -- Bump WQE index by 16384
+                  local bump = (256 * qsize / (64*1024))
+                  wqes[index].u8[1] = wqes[index].u8[1] + bump
+                  index = ((index + 1) % qsize)
+               end
+               local ix = (index-1)%qsize
+               bf_a[0] = wqes[ix].u64[0]
+               bf_a, bf_b = bf_b, bf_a -- swap
+               bf_a[0] = wqes[ix].u64[0]
+               index_k[k] = index
             end
-            local ix = (index-1)%qsize
-            bf_a[0] = wqes[ix].u64[0]
-            bf_a, bf_b = bf_b, bf_a -- swap
-            bf_a[0] = wqes[ix].u64[0]
-            index_k[k] = index
+            lib.compiler_barrier()
          end
-         lib.compiler_barrier()
       end
+      local finish = C.get_time_ns()
+      local packets = cmdq:query_vport_counter()
+      print(("Processed %fM packets in %f seconds (%f Mpps)"):format(
+                (packets-oldpackets)/1e6,
+                tonumber(finish-start)/1e9,
+                (packets-oldpackets) * 1000 / tonumber(finish-start)))
+      oldpackets = packets
    end
-   local finish = C.get_time_ns()
-   local packets = cmdq:query_vport_counter()
-   print(("Processed %fM packets in %f seconds (%f Mpps)"):format(
-             packets/1e6,
-             tonumber(finish-start)/1e9,
-             packets * 1000 / tonumber(finish-start)))
    os.exit(0)
    --[[
    for i = 1, 100000 do
