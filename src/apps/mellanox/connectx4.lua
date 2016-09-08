@@ -651,9 +651,24 @@ local doorbell_t = ffi.typeof[[
 
 RQ = {}
 
+local rwqe_t = ffi.typeof[[
+  struct {
+    uint32_t length, lkey, address_high, address_low;
+  }
+]]
+
 function RQ:new (rqn, rwq, doorbell)
    return setmetatable({rqn = rqn, rwq = rwq, doorbell = doorbell},
       {__index = RQ})
+end
+
+function RQ:enqueue (p)
+   local index = self.wqnext or 0
+   local rwqe = self.rwq[index]
+   rwqe.length = bswap(p.length)
+   rwqe.lkey = self.rlkey
+   rwqe.address_high = bswap(shr(phy, 32))
+   rwqe.address_low  = bswap(band(phy, 0xFFFFFFFF))
 end
 
 ---------------------------------------------------------------
