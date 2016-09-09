@@ -1564,9 +1564,9 @@ function ConnectX4:new(arg)
    end
    debug = false
    local oldpackets = 0
-   while true do
+--   while true do
       local start = C.get_time_ns()
-      for i = 0, math.floor(100000000/nsendqueues) do
+      for i = 0, math.floor(1000000/nsendqueues) do
          for k = 1, nsendqueues do
             local db_sq = db_sq_k[k]
             local cqes = cqes_k[k]
@@ -1598,7 +1598,7 @@ function ConnectX4:new(arg)
                 tonumber(finish-start)/1e9,
                 (packets-oldpackets) * 1000 / tonumber(finish-start)))
       oldpackets = packets
-   end
+--   end
    os.exit(0)
    --[[
    for i = 1, 100000 do
