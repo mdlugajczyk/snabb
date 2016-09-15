@@ -614,6 +614,7 @@ function HCA:create_sq (cq, pd, size, doorbell, swq, tis, mmio, uar, rlkey)
       :input("tis",            0x20 + 0x2C,        23, 0, tis)
       :input("wq_type",        0x20 + 0x30 + 0x00, 31, 28, 1) -- cyclic
       :input("pd",             0x20 + 0x30 + 0x08, 23, 0, pd)
+      :input("uar_page",       0x20 + 0x30 + 0x0C, 23, 0, uar)
       :input("pas[0] high",    0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
       :input("pas[0] low",     0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
       :input("log_wq_stride",  0x20 + 0x30 + 0x20, 19, 16, 6)
@@ -710,6 +711,7 @@ function SQ:enqueue_gather (p)
    wqe.u32[14] = bswap(tonumber(phy) / 2^32)
    wqe.u32[15] = bswap(tonumber(phy) % 2^32)
 
+   self.index = index
    self.wqnext = index + 1
 end
 
@@ -742,18 +744,10 @@ end
 
 function SQ:ring_doorbell ()
    if self.index then
-      print("ringing doorbell") io.flush()
-      self.doorbell.send = bswap((self.index + 1) % 1024) -- XXX qsize
-      print(lib.hexdump(ffi.string(self.swq[0], 64)))
+      self.doorbell.send = bswap(self.index)
       self.bf_next[0] = self.swq[self.index].u64[0]
       self.bf_next, self.bf_alt = self.bf_alt, self.bf_next
    end
-end
-
-function SQ:freshen ()
-   print("cqe3", self.cqe)
-   --self:ring_doorbell(1)
-   self:ring_doorbell(0)
 end
 
 function SQ:nop ()
@@ -1337,9 +1331,9 @@ function selftest ()
    p.data[11] = 1
    p.data[12] = 0xFF
    ffi.fill(p.data+14, p.length-14, 0xFF)
-   app.sq:enqueue_gather(p)
+   for i = 1, 5 do app.sq:enqueue_gather(p) end
    C.usleep(5e6)
-   app.sq:freshen()
+   app.sq:ring_doorbell()
    C.usleep(0.5e6)
    print("cqe", app.sq:poll())
    app.hca:query_vport_counter()
