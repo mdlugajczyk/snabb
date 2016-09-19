@@ -128,7 +128,7 @@ function ConnectX4:new (arg)
    -- Create the queue objects
    local sq = hca:create_sq(send_cq, pd, sendq_size, wq_doorbell, swq, tis, mmio, uar, rlkey)
    hca:modify_sq(sq.sqn, 0, 1) -- RESET -> READY
-   local rq = hca:create_rq(recv_cq, pd, recvq_size, wq_doorbell, rwq)
+   local rq = hca:create_rq(recv_cq, pd, recvq_size, wq_doorbell, rwq, rlkey)
    hca:modify_rq(rq.rqn, 0, 1) -- RESET -> READY
    local tir = hca:create_tir_direct(rq.rqn, tdomain)
 
@@ -140,6 +140,10 @@ function ConnectX4:new (arg)
    hca:set_flow_table_entry_wildcard(rx_flow_table_id, NIC_RX, flow_group_id, 0, tir)
    hca:set_flow_table_root(rx_flow_table_id, NIC_RX)
 
+   while hca:query_vport_state().oper_state ~= 1 do
+      C.usleep(1e6)
+   end
+
    function self:stop ()
       pci.set_bus_master(pciaddress, false)
       pci.reset_device(pciaddress)
@@ -150,6 +154,7 @@ function ConnectX4:new (arg)
    -- Save "instance variable" values.
    self.hca = hca
    self.sq = sq
+   self.rq = rq
 
    return self
 end
@@ -554,7 +559,7 @@ end
 
 -- Create a receive queue and return a receive queue object.
 -- Return the receive queue number and a pointer to the WQEs.
-function HCA:create_rq (cq, pd, size, doorbell, rwq)
+function HCA:create_rq (cq, pd, size, doorbell, rwq, rlkey)
    local log_wq_size = log2size(size)
    local db_phy = memory.virtual_to_physical(doorbell)
    local rwq_phy = memory.virtual_to_physical(rwq)
@@ -574,7 +579,7 @@ function HCA:create_rq (cq, pd, size, doorbell, rwq)
       :input("pas[0] low",    0x20 + 0x30 + 0xC4, 31,  0, ptrbits(rwq_phy, 31, 0))
       :execute()
    local rqn = self:output(0x08, 23, 0)
-   return RQ:new(rqn, rwq, doorbell)
+   return RQ:new(rqn, rwq, doorbell, rlkey)
 end
 
 -- Modify a Receive Queue by making a state transition.
@@ -654,21 +659,28 @@ RQ = {}
 local rwqe_t = ffi.typeof[[
   struct {
     uint32_t length, lkey, address_high, address_low;
-  }
+  } *
 ]]
 
-function RQ:new (rqn, rwq, doorbell)
-   return setmetatable({rqn = rqn, rwq = rwq, doorbell = doorbell},
+function RQ:new (rqn, rwq, doorbell, rlkey)
+   doorbell = ffi.cast("uint32_t*", doorbell)
+   rwq = ffi.cast(rwqe_t, rwq)
+   return setmetatable({rqn = rqn, rwq = rwq, doorbell = doorbell, rlkey = rlkey},
       {__index = RQ})
 end
 
 function RQ:enqueue (p)
    local index = self.wqnext or 0
    local rwqe = self.rwq[index]
+   local phy = memory.virtual_to_physical(p.data)
    rwqe.length = bswap(p.length)
    rwqe.lkey = self.rlkey
    rwqe.address_high = bswap(shr(phy, 32))
    rwqe.address_low  = bswap(band(phy, 0xFFFFFFFF))
+end
+
+function RQ:ring_doorbell ()
+   self.doorbell[0] = bswap(self.wqnext or 0)
 end
 
 ---------------------------------------------------------------
@@ -1338,7 +1350,9 @@ function selftest ()
    p.data[12] = 0xFF
    ffi.fill(p.data+14, p.length-14, 0xFF)
    app.sq:enqueue_gather(p)
-   C.usleep(5e6)
+   app.rq:enqueue(packet.allocate())
+   app.rq:ring_doorbell()
+   C.usleep(0.5e6)
    app.sq:freshen()
    C.usleep(0.5e6)
    print("cqe", app.sq:poll())
