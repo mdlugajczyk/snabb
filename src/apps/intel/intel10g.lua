@@ -64,13 +64,13 @@ function new_sf (conf)
                  r = {},           -- Configuration registers
                  s = {},           -- Statistics registers
                  qs = {},          -- queue statistic registers
-                 txdesc = 0,     -- Transmit descriptors (pointer)
-                 txdesc_phy = 0, -- Transmit descriptors (physical address)
+                 txdesc = 0,       -- Transmit descriptors (pointer)
+                 txdesc_phy = 0,   -- Transmit descriptors (physical address)
                  txpackets = {},   -- Tx descriptor index -> packet mapping
                  tdh = 0,          -- Cache of transmit head (TDH) register
                  tdt = 0,          -- Cache of transmit tail (TDT) register
-                 rxdesc = 0,     -- Receive descriptors (pointer)
-                 rxdesc_phy = 0, -- Receive descriptors (physical address)
+                 rxdesc = 0,       -- Receive descriptors (pointer)
+                 rxdesc_phy = 0,   -- Receive descriptors (physical address)
                  rxpackets = {},   -- Rx descriptor index -> packet mapping
                  rdh = 0,          -- Cache of receive head (RDH) register
                  rdt = 0,          -- Cache of receive tail (RDT) register

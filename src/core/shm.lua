@@ -130,7 +130,7 @@ function create_frame (path, specs)
    frame.path = path.."/"
    for name, spec in pairs(specs) do
       assert(frame[name] == nil, "shm: duplicate name: "..name)
-      local module = spec[1]
+      local module = types[spec[1]]
       local initargs = lib.array_copy(spec)
       table.remove(initargs, 1) -- strip type name from spec
       frame[name] = module.create(frame.path..name.."."..module.type,
@@ -155,6 +155,9 @@ function open_frame (path)
          frame.specs[name] = {module}
       end
    end
+   setmetatable(frame, {__index = function (t, k)
+                           return rawget(t, k) or error("shm object not in frame: "..tostring(k))
+                        end})
    return frame
 end
 

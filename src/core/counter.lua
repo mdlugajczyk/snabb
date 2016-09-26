@@ -47,6 +47,7 @@ local private = {}
 local numbers = {} -- name -> number
 
 function create (name, initval)
+   print("create", name, bit.tohex(initval or 0, 16))
    if numbers[name] then return private[numbers[name]] end
    local n = #public+1
    public[n] = shm.create(name, counter_t)

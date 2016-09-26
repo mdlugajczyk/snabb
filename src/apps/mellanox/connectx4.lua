@@ -38,6 +38,8 @@ local index_set = require("lib.index_set")
 local macaddress = require("lib.macaddress")
 local mib = require("lib.ipc.shmem.mib")
 local timer = require("core.timer")
+local shm = require("core.shm")
+local counter = require("core.counter")
 local bits, bitset = lib.bits, lib.bitset
 local floor = math.floor
 local cast = ffi.cast
@@ -47,6 +49,10 @@ local band, bor, shl, shr, bswap, bnot =
 local debug_trace   = true      -- Print trace messages
 local debug_hexdump = false     -- Print hexdumps (in Linux mlx5 format)
 
+-- Maximum size of a receive queue table.
+-- XXX This is hard-coded in the Linux mlx5 driver too. Could
+-- alternatively detect from query_hca_cap.
+local rqt_max_size = 128
 
 ---------------------------------------------------------------
 -- ConnectX4 Snabb app.
@@ -57,6 +63,11 @@ local debug_hexdump = false     -- Print hexdumps (in Linux mlx5 format)
 
 ConnectX4 = {}
 ConnectX4.__index = ConnectX4
+
+-- pciaddress
+-- loopback = bool
+-- mtu = <n>
+-- queues = { name* } | { name, vlan?, mac?, sendqsize?, recvqsize? }
 
 function ConnectX4:new (arg)
    local self = setmetatable({}, self)
@@ -93,7 +104,7 @@ function ConnectX4:new (arg)
    hca:enable_hca()
    hca:set_issi(1)
    hca:alloc_pages(hca:query_pages("boot"))
-   if debug_trace then self:dump_capabilities() end
+   if debug_trace then self:dump_capabilities(hca) end
 
    -- Initialize the card
    --
@@ -114,23 +125,64 @@ function ConnectX4:new (arg)
    -- Create send and receive queues & associated objects
    --
    local tis = hca:create_tis(0, tdomain)
-   local send_cq = hca:create_cq(1,    uar, eq.eqn, true)
-   local recv_cq = hca:create_cq(1024, uar, eq.eqn, false)
+   -- List of all receive queues for hashing traffic across
+   local rqlist = {}
 
-   -- Allocate work queue memory (receive & send contiguous in memory)
-   local wq_doorbell = memory.dma_alloc(16)
-   local sendq_size = 1024
-   local recvq_size = 1024
-   local workqueues = memory.dma_alloc(64 * (sendq_size + recvq_size), 4096)
-   local rwq = workqueues                   -- receive work queue
-   local swq = workqueues + 64 * recvq_size -- send work queue
+   for _, queuename in ipairs(conf.queues) do
+      
+      print("queuename", queuename)
 
-   -- Create the queue objects
-   local sq = hca:create_sq(send_cq, pd, sendq_size, wq_doorbell, swq, tis, mmio, uar, rlkey)
-   hca:modify_sq(sq.sqn, 0, 1) -- RESET -> READY
-   local rq = hca:create_rq(recv_cq, pd, recvq_size, wq_doorbell, rwq, rlkey)
-   hca:modify_rq(rq.rqn, 0, 1) -- RESET -> READY
-   local tir = hca:create_tir_direct(rq.rqn, tdomain)
+      local send_cq = hca:create_cq(1,    uar, eq.eqn, true)
+      local recv_cq = hca:create_cq(1024, uar, eq.eqn, false)
+
+      -- Allocate work queue memory (receive & send contiguous in memory)
+      local wq_doorbell = memory.dma_alloc(16)
+      local sendq_size = 1024
+      local recvq_size = 1024
+      local workqueues = memory.dma_alloc(64 * (sendq_size + recvq_size), 4096)
+      local rwq = workqueues                   -- receive work queue
+      local swq = workqueues + 64 * recvq_size -- send work queue
+      
+      -- Create the queue objects
+      local sqn = hca:create_sq(send_cq, pd, sendq_size, wq_doorbell, swq, tis)
+      hca:modify_sq(sqn, 0, 1) -- RESET -> READY
+      local rqn = hca:create_rq(recv_cq, pd, recvq_size, wq_doorbell, rwq)
+      hca:modify_rq(rqn, 0, 1) -- RESET -> READY
+
+      table.insert(rqlist, rqn)
+
+      -- Create shared memory objects containing all of the
+      -- information needed to access the send and receive queues.
+      --
+      -- Snabb processes will use this information to take ownership
+      -- of the queue to send and receive packets.
+      local basepath = "/pci/"..pciaddress.."/"..queuename
+      local sendpath = basepath.."/send"
+      local recvpath = basepath.."/recv"
+      local u64 = function (x) return ffi.cast("uint64_t", x) end
+      shm.create_frame(sendpath,
+                       {lock     = {'counter'},
+                        sqn      = {'counter', sqn},
+                        wq       = {'counter', u64(swq)},
+                        wqsize   = {'counter', sendq_size},
+                        cq       = {'counter', send_cq.cqn},
+                        doorbell = {'counter', u64(wq_doorbell)},
+                        uar_page = {'counter', uar},
+                        rlkey    = {'counter', rlkey}})
+      shm.create_frame(recvpath,
+                       {lock     = {'counter'},
+                        rqn      = {'counter', rqn},
+                        wq       = {'counter', u64(rwq)},
+                        wqsize   = {'counter', recvq_size},
+                        cq       = {'counter', recv_cq.cqn},
+                        doorbell = {'counter', u64(wq_doorbell)},
+                        uar_page = {'counter', uar},
+                        rlkey    = {'counter', rlkey}})
+   end
+
+   --local tir = hca:create_tir_direct(rq.rqn, tdomain)
+   local rqt = hca:create_rqt(rqlist)
+   local tir = hca:create_tir_indirect(rqt, tdomain)
 
    -- Setup packet dispatching.
    -- Just a "wildcard" flow group to send RX packets to the receive queue.
@@ -153,19 +205,17 @@ function ConnectX4:new (arg)
 
    -- Save "instance variable" values.
    self.hca = hca
-   self.sq = sq
-   self.rq = rq
 
    return self
 end
 
-function ConnectX4:dump_capabilities ()
-   if true then return end
+function ConnectX4:dump_capabilities (hca)
+   --if true then return end
    -- Print current and maximum card capabilities.
    -- XXX Check if we have any specific requirements that we need to
    --     set and/or assert on.
-   local cur = self.hca:query_hca_general_cap('current')
-   local max = self.hca:query_hca_general_cap('max')
+   local cur = hca:query_hca_general_cap('current')
+   local max = hca:query_hca_general_cap('max')
    print'Capabilities - current and (maximum):'
    for k in pairs(cur) do
       print(("  %-24s = %-3s (%s)"):format(k, cur[k], max[k]))
@@ -271,7 +321,7 @@ end
 
 -- Provide the NIC with freshly allocated memory.
 function HCA:alloc_pages (num_pages)
-   self:command("MANAGE_PAGES", 0x10 + num_pages*8, 0x0C)
+   self:command("MANAGE_PAGES", 0x14 + num_pages*8, 0x0C)
       :input("opcode",            0x00, 31, 16, 0x108)
       :input("opmod",             0x04, 15, 0, 1) -- allocate mode
       :input("input_num_entries", 0x0C, 31, 0, num_pages, "input_num_entries")
@@ -396,7 +446,7 @@ function HCA:create_eq (uar)
 end
 
 -- Event Queue Entry (EQE)
-local eqe_t = ffi.typeof[[
+local eqe_t = ffi.typeof([[
   struct {
     uint16_t event_type;
     uint16_t event_sub_type;
@@ -405,7 +455,7 @@ local eqe_t = ffi.typeof[[
     uint8_t signature;
     uint8_t owner;
   }
-]]
+]])
 
 eq = {}
 eq.__index = eq
@@ -508,7 +558,38 @@ function HCA:create_tir_direct (rqn, transport_domain)
       :execute()
    return self:output(0x08, 23, 0)
 end
-   
+
+-- Create a TIR with indirect dispatching (hashing)
+function HCA:create_tir_indirect (rqt, transport_domain)
+   self:command("CREATE_TIR", 0x10C, 0x0C)
+      :input("opcode",           0x00,        31, 16, 0x900)
+      :input("disp_type",        0x20 + 0x04, 31, 28, 1) -- indirect
+      :input("rx_hash_symmetric",0x20 + 0x20, 31, 31, 1) -- hash symmetrically
+      :input("indirect_table",   0x20 + 0x20, 23,  0, rqt)
+      :input("rx_hash_fn",       0x20 + 0x24, 31, 28, 2) -- toeplitz
+      :input("transport_domain", 0x20 + 0x24, 23,  0, transport_domain)
+   -- XXX Is random hash key a good solution?
+   for i = 0x28, 0x4C, 4 do
+      self:input("toeplitz_key["..((i-0x28)/4).."]", 0x20 + i, 31,  0, math.random(2^32))
+   end
+   self:execute()
+   return self:output(0x08, 23, 0)
+end
+
+function HCA:create_rqt (rqlist)
+   -- Problem: Hardware requires number of hash buckets to be a power of 2.
+   -- Workaround: Setup max # hash buckets and fill with queues in a loop.
+   self:command("CREATE_RQT", 0x20 + 0xF0 + 4*rqt_max_size, 0x0C)
+      :input("opcode",          0x00,        31, 16, 0x916)
+      :input("rqt_max_size",    0x20 + 0x14, 15,  0, rqt_max_size)
+      :input("rqt_actual_size", 0x20 + 0x18, 15,  0, rqt_max_size)
+   for i = 0, rqt_max_size-1 do
+      self:input("rq_num["..i.."]", 0x20 + 0xF0 + i*4, 23, 0, rqlist[1 + (i % #rqlist)])
+   end
+   self:execute()
+   return self:output(0x08, 23, 0)
+end
+
 -- Create TIS (Transport Interface Send)
 function HCA:create_tis (prio, transport_domain)
    self:command("CREATE_TIS", 0x20 + 0x9C, 0x0C)
@@ -559,7 +640,7 @@ end
 
 -- Create a receive queue and return a receive queue object.
 -- Return the receive queue number and a pointer to the WQEs.
-function HCA:create_rq (cq, pd, size, doorbell, rwq, rlkey)
+function HCA:create_rq (cq, pd, size, doorbell, rwq)
    local log_wq_size = log2size(size)
    local db_phy = memory.virtual_to_physical(doorbell)
    local rwq_phy = memory.virtual_to_physical(rwq)
@@ -578,8 +659,7 @@ function HCA:create_rq (cq, pd, size, doorbell, rwq, rlkey)
       :input("pas[0] high",   0x20 + 0x30 + 0xC0, 63, 32, ptrbits(rwq_phy, 63, 32))
       :input("pas[0] low",    0x20 + 0x30 + 0xC4, 31,  0, ptrbits(rwq_phy, 31, 0))
       :execute()
-   local rqn = self:output(0x08, 23, 0)
-   return RQ:new(rqn, rwq, doorbell, rlkey)
+   return self:output(0x08, 23, 0)
 end
 
 -- Modify a Receive Queue by making a state transition.
@@ -604,7 +684,7 @@ end
 
 -- Create a Send Queue.
 -- Return the send queue number and a pointer to the WQEs.
-function HCA:create_sq (cq, pd, size, doorbell, swq, tis, mmio, uar, rlkey)
+function HCA:create_sq (cq, pd, size, doorbell, swq, tis)
    local log_wq_size = log2size(size)
    local db_phy = memory.virtual_to_physical(doorbell)
    local swq_phy = memory.virtual_to_physical(swq)
@@ -627,8 +707,75 @@ function HCA:create_sq (cq, pd, size, doorbell, swq, tis, mmio, uar, rlkey)
       :input("pas[0] high",    0x20 + 0x30 + 0xC0, 31, 0, ptrbits(swq_phy, 63, 32))
       :input("pas[0] low",     0x20 + 0x30 + 0xC4, 31, 0, ptrbits(swq_phy, 31, 0))
       :execute()
-   local sqn = self:output(0x08, 23, 0)
-   return SQ:new(sqn, swq, doorbell, mmio, uar, rlkey, cq)
+   return self:output(0x08, 23, 0)
+end
+
+---------------------------------------------------------------
+-- IO app: attach to transmit and receive queues.
+---------------------------------------------------------------
+
+IO = {}
+IO.__index = IO
+
+function IO:new (arg)
+   local self = setmetatable({}, self)
+   local conf = config.parse_app_arg(arg)
+   local pciaddress = pci.qualified(conf.pciaddress)
+   local mmio, fd = pci.map_pci_memory(pciaddress, 0, false)
+
+   self.sqlist = {}
+   self.rqlist = {}
+
+   for _, queuename in ipairs(conf.queues) do
+      
+      local basepath = "/pci/"..pciaddress.."/"..queuename
+      local sendpath = basepath.."/send"
+      local recvpath = basepath.."/recv"
+      
+      local send = shm.open_frame(sendpath)
+      print("opened "..sendpath)
+      local recv = shm.open_frame(recvpath)
+      print("opened "..recvpath)
+      print(send.cq, send.sqn, send.rlkey)
+
+      local sq = SQ:new(counter.read(send.sqn),
+                        counter.read(send.wq),
+                        counter.read(send.doorbell),
+                        mmio,
+                        counter.read(send.uar_page),
+                        counter.read(send.rlkey),
+                        counter.read(send.cq))
+      local rq = RQ:new(counter.read(recv.rqn),
+                        counter.read(recv.wq),
+                        counter.read(recv.doorbell),
+                        counter.read(recv.rlkey))
+      table.insert(self.sqlist, sq)
+      table.insert(self.rqlist, rq)
+   end
+end
+
+function IO:push ()
+   local l = self.input.input
+   if l == nil then return end
+   while l and not empty(l) do
+      local p = link.receive(l)
+      local q = 1 + math.random(#self.sqlist)
+      local sq = self.sqlist[q]
+      sq:enqueue_gather(p)
+   end
+end
+
+function IO:pull ()
+   -- Free transmitted packets
+   for q = 1, #self.sqlist do
+      self.sqlist[q]:reclaim()
+   end
+   -- Input received packets
+   local l = self.output.output
+   if l == nil then return end
+   for q = 1, #self.rqlist do
+      self.rqlist[q]:receive(l)
+   end
 end
 
 ---------------------------------------------------------------
@@ -694,11 +841,10 @@ function SQ:new (sqn, swq, doorbell, mmio, uar, rlkey, cq)
    doorbell = ffi.cast(doorbell_t, doorbell)
    local bf0odd  = ffi.cast("uint64_t*", mmio + (uar * 4096) + 0x800)
    local bf0even = ffi.cast("uint64_t*", mmio + (uar * 4096) + 0x900)
-   local cqe = ffi.cast(cqe_t, cq.cqe)
-   print("cqe", cqe)
+   local cqe = ffi.cast(cqe_t, cq)
    return setmetatable({sqn = sqn, swq = swq, doorbell = doorbell,
                         bf_next = bf0odd, bf_alt = bf0even,
-                        rlkey = rlkey, cq = cq, cqe = cqe},
+                        rlkey = rlkey, cqe = cqe},
       {__index = SQ})
 end
 
@@ -763,7 +909,6 @@ function SQ:ring_doorbell ()
 end
 
 function SQ:freshen ()
-   print("cqe3", self.cqe)
    --self:ring_doorbell(1)
    self:ring_doorbell(0)
 end
@@ -775,7 +920,6 @@ end
 local uint32_t = ffi.typeof("uint32_t")
 
 function SQ:poll ()
-   print("cqe2", self.cqe)
    local counter = shr(bswap(self.cqe.u32[0x3C/4]), 16)
    local status = self.cqe.u8[0x3F]
    return counter, status
@@ -997,6 +1141,10 @@ function HCA:input (name, offset, hi, lo, value)
    assert(offset % 4 == 0)
    if debug_trace and name then
       print(("input @ %4xh (%2d:%2d) %-20s = %10xh (%d)"):format(offset, hi, lo, name, value, value))
+   end
+   if offset > self.input_size-4 then
+      error(("input offset out of bounds: %sh > %sh"):format(
+            bit.tohex(offset, 4), bit.tohex(self.input_size-4, 4)))
    end
    if offset <= 16 - 4 then -- inline
       self:setbits(0x10 + offset, hi, lo, value)
@@ -1342,7 +1490,11 @@ function selftest ()
    end
 
    local device_info = pci.device_info(pcidev)
-   local app = ConnectX4:new{pciaddress = pcidev}
+   --local app = ConnectX4:new{pciaddress = pcidev, queues = {'a', 'b', 'c'}}
+   local app = ConnectX4:new{pciaddress = pcidev, queues = {'a'}}
+   local io = IO:new({pciaddress = pcidev, queues = {'a'}})
+   os.exit(0)
+
    local p = packet.allocate()
    p.length = 60
    ffi.fill(p.data, 6, 0xFF)
