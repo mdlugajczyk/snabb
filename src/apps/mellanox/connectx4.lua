@@ -128,10 +128,12 @@ function ConnectX4:new (arg)
    -- List of all receive queues for hashing traffic across
    local rqlist = {}
 
+   print("waiting for link up")
+   while hca:query_vport_state().oper_state ~= 1 do
+      C.usleep(1e6)
+   end
    for _, queuename in ipairs(conf.queues) do
       
-      print("queuename", queuename)
-
       local send_cq = hca:create_cq(1,    uar, eq.eqn, true)
       local recv_cq = hca:create_cq(1024, uar, eq.eqn, false)
 
@@ -144,7 +146,7 @@ function ConnectX4:new (arg)
       local swq = workqueues + 64 * recvq_size -- send work queue
       
       -- Create the queue objects
-      local sqn = hca:create_sq(send_cq, pd, sendq_size, wq_doorbell, swq, tis)
+      local sqn = hca:create_sq(send_cq, pd, sendq_size, wq_doorbell, swq, uar, tis)
       hca:modify_sq(sqn, 0, 1) -- RESET -> READY
       local rqn = hca:create_rq(recv_cq, pd, recvq_size, wq_doorbell, rwq)
       hca:modify_rq(rqn, 0, 1) -- RESET -> READY
@@ -165,7 +167,8 @@ function ConnectX4:new (arg)
                         sqn      = {'counter', sqn},
                         wq       = {'counter', u64(swq)},
                         wqsize   = {'counter', sendq_size},
-                        cq       = {'counter', send_cq.cqn},
+                        cqn      = {'counter', send_cq.cqn},
+                        cqe      = {'counter', u64(send_cq.cqe)},
                         doorbell = {'counter', u64(wq_doorbell)},
                         uar_page = {'counter', uar},
                         rlkey    = {'counter', rlkey}})
@@ -174,15 +177,16 @@ function ConnectX4:new (arg)
                         rqn      = {'counter', rqn},
                         wq       = {'counter', u64(rwq)},
                         wqsize   = {'counter', recvq_size},
-                        cq       = {'counter', recv_cq.cqn},
+                        cqn      = {'counter', recv_cq.cqn},
+                        cqe      = {'counter', u64(recv_cq.cqe)},
                         doorbell = {'counter', u64(wq_doorbell)},
                         uar_page = {'counter', uar},
                         rlkey    = {'counter', rlkey}})
    end
 
-   --local tir = hca:create_tir_direct(rq.rqn, tdomain)
+   local tir = hca:create_tir_direct(rqlist[1], tdomain)
    local rqt = hca:create_rqt(rqlist)
-   local tir = hca:create_tir_indirect(rqt, tdomain)
+   --local tir = hca:create_tir_indirect(rqt, tdomain)
 
    -- Setup packet dispatching.
    -- Just a "wildcard" flow group to send RX packets to the receive queue.
@@ -446,7 +450,7 @@ function HCA:create_eq (uar)
 end
 
 -- Event Queue Entry (EQE)
-local eqe_t = ffi.typeof([[
+local eqe_t = ffi.typeof[[
   struct {
     uint16_t event_type;
     uint16_t event_sub_type;
@@ -455,7 +459,7 @@ local eqe_t = ffi.typeof([[
     uint8_t signature;
     uint8_t owner;
   }
-]])
+ ]]
 
 eq = {}
 eq.__index = eq
@@ -684,7 +688,7 @@ end
 
 -- Create a Send Queue.
 -- Return the send queue number and a pointer to the WQEs.
-function HCA:create_sq (cq, pd, size, doorbell, swq, tis)
+function HCA:create_sq (cq, pd, size, doorbell, swq, uar, tis)
    local log_wq_size = log2size(size)
    local db_phy = memory.virtual_to_physical(doorbell)
    local swq_phy = memory.virtual_to_physical(swq)
@@ -699,6 +703,7 @@ function HCA:create_sq (cq, pd, size, doorbell, swq, tis)
       :input("tis",            0x20 + 0x2C,        23, 0, tis)
       :input("wq_type",        0x20 + 0x30 + 0x00, 31, 28, 1) -- cyclic
       :input("pd",             0x20 + 0x30 + 0x08, 23, 0, pd)
+      :input("uar_page",       0x20 + 0x30 + 0x0C, 23, 0, uar)
       :input("pas[0] high",    0x20 + 0x30 + 0x10, 31, 0, ptrbits(db_phy, 63, 32))
       :input("pas[0] low",     0x20 + 0x30 + 0x14, 31, 0, ptrbits(db_phy, 31, 0))
       :input("log_wq_stride",  0x20 + 0x30 + 0x20, 19, 16, 6)
@@ -706,6 +711,7 @@ function HCA:create_sq (cq, pd, size, doorbell, swq, tis)
       :input("log_wq_size",    0x20 + 0x30 + 0x20, 4,  0,  log_wq_size)
       :input("pas[0] high",    0x20 + 0x30 + 0xC0, 31, 0, ptrbits(swq_phy, 63, 32))
       :input("pas[0] low",     0x20 + 0x30 + 0xC4, 31, 0, ptrbits(swq_phy, 31, 0))
+
       :execute()
    return self:output(0x08, 23, 0)
 end
@@ -736,32 +742,39 @@ function IO:new (arg)
       print("opened "..sendpath)
       local recv = shm.open_frame(recvpath)
       print("opened "..recvpath)
-      print(send.cq, send.sqn, send.rlkey)
+      print(send.cqe, send.sqn, send.rlkey)
 
-      local sq = SQ:new(counter.read(send.sqn),
+      local sq = SQ:new(tonumber(counter.read(send.sqn)),
                         counter.read(send.wq),
+                        tonumber(counter.read(send.wqsize)),
                         counter.read(send.doorbell),
                         mmio,
-                        counter.read(send.uar_page),
-                        counter.read(send.rlkey),
-                        counter.read(send.cq))
+                        tonumber(counter.read(send.uar_page)),
+                        tonumber(counter.read(send.rlkey)),
+                        counter.read(send.cqe))
       local rq = RQ:new(counter.read(recv.rqn),
                         counter.read(recv.wq),
                         counter.read(recv.doorbell),
-                        counter.read(recv.rlkey))
+                        counter.read(recv.rlkey),
+                        counter.read(recv.cqe))
+      rq:enqueue(packet.allocate()) -- XXX
       table.insert(self.sqlist, sq)
       table.insert(self.rqlist, rq)
    end
+   return self
 end
 
 function IO:push ()
    local l = self.input.input
    if l == nil then return end
-   while l and not empty(l) do
+   while l and not link.empty(l) do
       local p = link.receive(l)
-      local q = 1 + math.random(#self.sqlist)
+      local q = math.random(#self.sqlist)
       local sq = self.sqlist[q]
+      --print(q,sq,#self.sqlist)
       sq:enqueue_gather(p)
+      sq:ring_doorbell()
+      sq:poll()
    end
 end
 
@@ -774,6 +787,8 @@ function IO:pull ()
    local l = self.output.output
    if l == nil then return end
    for q = 1, #self.rqlist do
+      --self.rqlist[q]:enqueue(packet.allocate())
+      self.rqlist[q]:ring_doorbell()
       self.rqlist[q]:receive(l)
    end
 end
@@ -809,25 +824,35 @@ local rwqe_t = ffi.typeof[[
   } *
 ]]
 
-function RQ:new (rqn, rwq, doorbell, rlkey)
-   doorbell = ffi.cast("uint32_t*", doorbell)
+function RQ:new (rqn, rwq, doorbell, rlkey, cq)
+   doorbell = ffi.cast(doorbell_t, doorbell)
    rwq = ffi.cast(rwqe_t, rwq)
-   return setmetatable({rqn = rqn, rwq = rwq, doorbell = doorbell, rlkey = rlkey},
+   cqe = ffi.cast(cqe_t, cq)
+   return setmetatable({rqn = rqn, rwq = rwq, doorbell = doorbell,
+                        rlkey = rlkey, cqe = cqe},
       {__index = RQ})
 end
 
 function RQ:enqueue (p)
    local index = self.wqnext or 0
+   print("setting up packet "..index)
    local rwqe = self.rwq[index]
    local phy = memory.virtual_to_physical(p.data)
    rwqe.length = bswap(p.length)
    rwqe.lkey = self.rlkey
-   rwqe.address_high = bswap(shr(phy, 32))
-   rwqe.address_low  = bswap(band(phy, 0xFFFFFFFF))
+   rwqe.address_high = bswap(tonumber(shr(phy, 32)))
+   rwqe.address_low  = bswap(tonumber(band(phy, 0xFFFFFFFF)))
+   self.wqnext = index + 1
+end
+
+function RQ:receive ()
+   print(lib.hexdump(ffi.string(self.rwq[0], 32)))
+   print(lib.hexdump(ffi.string(self.cqe[0], 32)))
 end
 
 function RQ:ring_doorbell ()
-   self.doorbell[0] = bswap(self.wqnext or 0)
+   print("ring", self.wqnext)
+   self.doorbell[0].receive = bswap(self.wqnext or 0)
 end
 
 ---------------------------------------------------------------
@@ -835,26 +860,41 @@ end
 
 SQ = {}
 
-function SQ:new (sqn, swq, doorbell, mmio, uar, rlkey, cq)
+function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
+   -- Cast pointers to expected types
    mmio = ffi.cast("uint8_t*", mmio)
    swq = ffi.cast(wqe_t, swq)
    doorbell = ffi.cast(doorbell_t, doorbell)
+   -- Locate "blue flame" register areas for the UAR page
    local bf0odd  = ffi.cast("uint64_t*", mmio + (uar * 4096) + 0x800)
    local bf0even = ffi.cast("uint64_t*", mmio + (uar * 4096) + 0x900)
    local cqe = ffi.cast(cqe_t, cq)
-   return setmetatable({sqn = sqn, swq = swq, doorbell = doorbell,
-                        bf_next = bf0odd, bf_alt = bf0even,
-                        rlkey = rlkey, cqe = cqe},
+   return setmetatable({sqn = sqn, swq = swq, wqsize = wqsize,
+                        doorbell = doorbell, bf_next = bf0odd, bf_alt = bf0even,
+                        packets = ffi.new("struct packet *[?]", wqsize),
+                        uar = uar, rlkey = rlkey, cqe = cqe,
+                        reclaim_index = 0
+                       },
       {__index = SQ})
 end
 
 -- Enqueue a packet with data referenced for DMA gather.
 -- (Some data has to be inline but this is kept to a minimum.)
 function SQ:enqueue_gather (p)
-   local index = self.wqnext or 0
-   local wqe = self.swq[index]
+   self.index    = (self.index == nil) and 0 or ((self.index + 1) % self.wqsize)
+   self.wqeindex = (self.wqeindex == nil) and 0 or ((self.wqeindex + 1) % 65536)
+   --print("index", self.index, "wqeindex", self.wqeindex, self.packets[self.index])
+   --print("index", self.index)
+   if self.packets[self.index] ~= nil then
+      error("Packet transmit slot already in use: "..self.index)
+   end
+   self.packets[self.index] = p
+   local wqe = self.swq[self.index]
+   --print("Enqueue")
+   --print(("  index=%d uar=%d sqn=%d rlkey=%d wqe=%s cqe=%s"):format(
+   --      index, tonumber(self.uar), tonumber(self.sqn), tonumber(self.rlkey), wqe, self.cqe))
    -- Control Segment
-   wqe.u32[0] = bswap(shl(index, 8) + 0x0A)
+   wqe.u32[0] = bswap(shl(self.wqeindex, 8) + 0x0A)
    wqe.u32[1] = bswap(shl(self.sqn, 8) + 4)
    wqe.u32[2] = bswap(shl(2, 2)) -- completion always
    -- Ethernet Segment
@@ -867,50 +907,40 @@ function SQ:enqueue_gather (p)
    local phy = memory.virtual_to_physical(p.data + ninline)
    wqe.u32[14] = bswap(tonumber(phy) / 2^32)
    wqe.u32[15] = bswap(tonumber(phy) % 2^32)
-
-   self.wqnext = index + 1
 end
-
--- Enqueue a packet with data inline in the work queue.
--- First 16 bytes are inline in the Ethernet segment.
--- Remaining data is inline in a Send Data Segment.
-function SQ:enqueue_inline (p)
-   local index = self.index and self.index + 1 or 0
-   local wqe = self.swq[index]
-   local ds = math.ceil((p.length + 48) / 16)
-   ds = 4
-   print("ds", ds)
-   -- Control Segment
-   wqe.u32[0] = bswap(shl(index, 8) + 0x0A)
-   wqe.u32[1] = bswap(shl(self.sqn, 8) + ds)
-   -- Ethernet Segment
-   local ninline = 16
-   wqe.u32[7] = bswap(shl(ninline, 16))
-   ffi.copy(wqe.u8 + 0x1E, p.data, ninline)
-   -- Send Data Segment (inline data)
-   wqe.u32[12] = bswap(p.length - ninline)
-   wqe.u32[13] = bswap(self.rlkey)
-
-   local phy = memory.virtual_to_physical(p.data + ninline)
-   wqe.u32[14] = bswap(tonumber(phy) / 2^32)
-   wqe.u32[15] = bswap(tonumber(phy) % 2^32)
-
-   self.index = index
-end   
 
 function SQ:ring_doorbell ()
    if self.index then
-      print("ringing doorbell") io.flush()
-      self.doorbell.send = bswap((self.index + 1) % 1024) -- XXX qsize
-      print(lib.hexdump(ffi.string(self.swq[0], 64)))
+      self.doorbell.send = bswap(self.wqeindex)
       self.bf_next[0] = self.swq[self.index].u64[0]
       self.bf_next, self.bf_alt = self.bf_alt, self.bf_next
    end
 end
 
-function SQ:freshen ()
-   --self:ring_doorbell(1)
-   self:ring_doorbell(0)
+function SQ:reclaim ()
+   local cqe = self.cqe[0]
+   local wqeopcode = cqe.u8[0x38]
+   -- Got a send data completion? (False if no packets have been sent)
+   if wqeopcode == 0x0A then
+      --print(lib.hexdump(ffi.string(cqe, 64)))
+      local wqe_counter = shr(bswap(cqe.u32[0x3C/4]), 16) % self.wqsize
+      local sentinel = (wqe_counter + 1) % self.wqsize
+      if self.reclaim_index ~= sentinel then
+         --print("wqe_counter", wqe_counter, "reclaim_index", self.reclaim_index)
+         local index = self.reclaim_index
+         -- Free packets that are transmitted
+         while index ~= sentinel do
+            if self.packets[index] == nil then
+               error("failed to reclaim packet index "..index)
+            end
+            packet.free(self.packets[index])
+            self.packets[index] = nil
+            --print("reclaim "..index)
+            index = (index + 1) % self.wqsize
+         end
+         self.reclaim_index = index
+      end
+   end
 end
 
 function SQ:nop ()
@@ -922,6 +952,7 @@ local uint32_t = ffi.typeof("uint32_t")
 function SQ:poll ()
    local counter = shr(bswap(self.cqe.u32[0x3C/4]), 16)
    local status = self.cqe.u8[0x3F]
+   --print("counter", counter, "status", status)
    return counter, status
 end
 
@@ -1439,7 +1470,6 @@ end
 function getint (pointer, offset)
    assert(offset % 4 == 0, "offset not dword-aligned")
    local r = bswap(pointer[offset/4])
-   --print("getint", pointer, offset, r, bit.tohex(r))
    return r
 end
 
@@ -1482,17 +1512,43 @@ end
 function selftest ()
    io.stdout:setvbuf'no'
 
-   local pcidev = lib.getenv("SNABB_PCI_CONNECTX4_0")
+   local pcidev0 = lib.getenv("SNABB_PCI_CONNECTX4_0")
+   local pcidev1 = lib.getenv("SNABB_PCI_CONNECTX4_1")
    -- XXX check PCI device type
-   if not pcidev then
+   if not pcidev0 then
       print("SNABB_PCI_CONNECTX4_0 not set")
       os.exit(engine.test_skipped_code)
    end
+   if not pcidev1 then
+      print("SNABB_PCI_CONNECTX4_1 not set")
+      os.exit(engine.test_skipped_code)
+   end
 
-   local device_info = pci.device_info(pcidev)
    --local app = ConnectX4:new{pciaddress = pcidev, queues = {'a', 'b', 'c'}}
-   local app = ConnectX4:new{pciaddress = pcidev, queues = {'a'}}
-   local io = IO:new({pciaddress = pcidev, queues = {'a'}})
+   local nic0 = ConnectX4:new{pciaddress = pcidev0, queues = {'a'}}
+   local nic1 = ConnectX4:new{pciaddress = pcidev1, queues = {'b'}}
+   local io0 = IO:new({pciaddress = pcidev0, queues = {'a'}})
+   local io1 = IO:new({pciaddress = pcidev1, queues = {'b'}})
+   io0.input  = { input = link.new('input') }
+   io0.output = { output = link.new('output') }
+   io1.input  = { input = link.new('input') }
+   io1.output = { output = link.new('output') }
+   for i = 1, 10 do
+      for _, app in ipairs({io0, io1}) do
+         for i = 1, 10 do
+            local p = packet.allocate()
+            p.length = 100
+            link.transmit(app.input.input, p)
+         end
+         app:pull()
+         app:push()
+      end
+      C.usleep(100000)
+   end
+   nic0.hca:query_vport_counter()
+   nic1.hca:query_vport_counter()
+   nic0:stop()
+   nic1:stop()
    os.exit(0)
 
    local p = packet.allocate()
