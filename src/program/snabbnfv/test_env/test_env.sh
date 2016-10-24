@@ -118,7 +118,7 @@ function launch_qemu {
     fi
     tmux_launch \
         "qemu$qemu_n" \
-        "taskset -c 2,3 \
+        "numactl --cpunodebind=$(pci_node $1) --membind=$(pci_node $1) \
         $QEMU $QEMU_ARGS \
         -kernel $assets/$4 \
         -append \"earlyprintk root=/dev/vda $SNABB_KERNEL_PARAMS rw console=ttyS1 ip=$(ip $qemu_n)\" \
@@ -149,7 +149,7 @@ function qemu_dpdk {
 }
 
 function snabbnfv_bench {
-    taskset -c 1 \
+    numactl --cpunodebind=$(pci_node $1) --membind=$(pci_node $1) \
         ./snabb snabbnfv traffic -b -B $2 $1 $3 vhost_%s.sock
 }
 
