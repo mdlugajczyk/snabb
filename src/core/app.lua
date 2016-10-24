@@ -343,6 +343,68 @@ function breathe ()
    counter.add(breaths)
    -- Commit counters at a reasonable frequency
    if counter.read(breaths) % 100 == 0 then counter.commit() end
+   trainer()
+end
+
+-- JIT Trainer
+--
+-- Supervise JIT operation. Force recompilation when load increases or
+-- efficiency decreases beyond a threshold.
+
+-- Train the JIT.
+
+local trainer_time
+local trainer_bytes
+function trainer ()
+   if trainer_time == nil then
+      trainer_time = now()
+      trainer_bytes = tonumber(counter.read(freebytes))
+   else
+      local elapsed = now() - trainer_time
+      if elapsed > 0.050 then
+         local newtime = now()
+         local newbytes = tonumber(counter.read(freebytes))
+         local l = (newbytes-trainer_bytes)/elapsed
+         train(l)
+         trainer_time = newtime
+         trainer_bytes = newbytes
+      end
+   end
+end
+
+local train_state = 'start'
+local train_load
+local l1, l2
+
+function train (l, e)
+   if train_state == 'start' then
+      l1 = nil
+      l2 = nil
+      train_state = 'training'
+      print("[jit training: started training]")
+   elseif train_state == 'training' then
+      if l1 and l2 and (l > l1) and (l > l2) then
+         -- Training complete: efficiency is greater than both of the
+         -- previous two runs.
+         print(("[jit training: completed with load delta %.2f%%]"):format(
+               100*l/(train_load or l)))
+         train_load = l
+         train_state = 'running'
+      else
+         print("[jit training: continuing]")
+         l1, l2 = l, l1         -- Update load history
+         jit.flush()            -- Roll the dice on new JIT traces
+      end
+   elseif train_state == 'running' then
+      if l >= train_load*1.10 or l <= train_load*0.90 then
+         -- Starting training if load has changed +/- 10%
+         train_state = 'start'
+         print(("[jit training: training needed with load=%.1f%%]"):format(
+               l*100/train_load))
+      end
+   else
+      assert(false)
+   end
 end
 
 function report (options)
