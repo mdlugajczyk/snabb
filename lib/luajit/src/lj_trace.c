@@ -343,10 +343,12 @@ static void penalty_pc(jit_State *J, GCproto *pt, BCIns *pc, TraceError e)
       /* First try to bump its hotcount several times. */
       val = ((uint32_t)J->penalty[i].val << 1) +
 	    LJ_PRNG_BITS(J, PENALTY_RNDBITS);
+#if 0
       if (val > PENALTY_MAX) {
 	blacklist_pc(pt, pc);  /* Blacklist it, if that didn't help. */
 	return;
       }
+#endif
       goto setpenalty;
     }
   /* Assign a new penalty cache slot. */
