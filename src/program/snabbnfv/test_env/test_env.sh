@@ -150,7 +150,7 @@ function qemu_dpdk {
 
 function snabbnfv_bench {
     numactl --cpunodebind=$(pci_node $1) --membind=$(pci_node $1) \
-        ./snabb snabbnfv traffic -B $2 $1 $3 vhost_%s.sock
+        ./snabb snabbnfv traffic -b -B $2 $1 $3 vhost_%s.sock
 }
 
 function on_exit {
