@@ -361,7 +361,7 @@ function trainer ()
       trainer_breathes = tonumber(counter.read(breaths))
    else
       local elapsed = now() - trainer_time
-      if elapsed > 0.025 then
+      if elapsed > 0.2 then
          local newtime = now()
          local newbreaths = tonumber(counter.read(breaths))
          local l = (newbreaths-trainer_breathes)/elapsed
@@ -375,29 +375,37 @@ end
 local train_state = 'start'
 local train_load
 local train_stamp
-local l1, l2
+local l1, l2, l3, l4
 
 function train (l, e)
    if train_state == 'start' then
       l1 = nil
       l2 = nil
+      l3 = nil
+      l4 = nil
       train_state = 'training'
       print("[jit training: started training]")
    elseif train_state == 'training' then
-      if l1 and l2 and (l > l1) and (l > l2) then
+      print(("[jit training: score %.2f (%.2f%%)]"):format(l, train_load and (l*100/train_load) or 0))
+      if l4 and (l > l1) and (l > l2) and (l > l3) and (l > l4) then
          -- Training complete: efficiency is greater than both of the
          -- previous two runs.
          print(("[jit training: completed with load delta %.2f%%]"):format(
                100*l/(train_load or l)))
+         print("l", "l1", "l2")
+         print(math.floor(l), math.floor(l1), math.floor(l2))
          train_load = l
          train_stamp = now()
          train_state = 'running'
       else
-         print("[jit training: continuing]")
-         l1, l2 = l, l1         -- Update load history
+         l4 = l3
+         l3 = l2
+         l2 = l1
+         l1 = l
          jit.flush()            -- Roll the dice on new JIT traces
       end
    elseif train_state == 'running' then
+      print("load: %.2f", l)
       if (now() >= train_stamp + 1.0) and (l >= train_load*1.20 or l <= train_load*0.80) then
          -- Starting training if load has changed +/- 10%
          train_state = 'start'
