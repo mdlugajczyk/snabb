@@ -54,7 +54,7 @@ function start_test_env {
         echo "Could not load test_env."; exit 1
     fi
 
-    if ! snabb $SNABB_PCI0 "snabbnfv traffic $SNABB_PCI0 $TESTCONFPATH vhost_%s.sock"; then
+    if ! snabb $SNABB_PCI0 "snabbnfv traffic -b $SNABB_PCI0 $TESTCONFPATH vhost_%s.sock"; then
         echo "Could not start snabb."; exit 1
     fi
 
