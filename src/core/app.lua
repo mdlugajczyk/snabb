@@ -354,26 +354,27 @@ end
 -- Train the JIT.
 
 local trainer_time
-local trainer_bytes
+local trainer_breaths
 function trainer ()
    if trainer_time == nil then
       trainer_time = now()
-      trainer_bytes = tonumber(counter.read(freebytes))
+      trainer_breathes = tonumber(counter.read(breaths))
    else
       local elapsed = now() - trainer_time
-      if elapsed > 0.050 then
+      if elapsed > 0.100 then
          local newtime = now()
-         local newbytes = tonumber(counter.read(freebytes))
-         local l = (newbytes-trainer_bytes)/elapsed
+         local newbreaths = tonumber(counter.read(breaths))
+         local l = (newbreaths-trainer_breathes)/elapsed
          train(l)
          trainer_time = newtime
-         trainer_bytes = newbytes
+         trainer_breathes = newbreaths
       end
    end
 end
 
 local train_state = 'start'
 local train_load
+local train_stamp
 local l1, l2
 
 function train (l, e)
@@ -389,6 +390,7 @@ function train (l, e)
          print(("[jit training: completed with load delta %.2f%%]"):format(
                100*l/(train_load or l)))
          train_load = l
+         train_stamp = now()
          train_state = 'running'
       else
          print("[jit training: continuing]")
@@ -396,7 +398,7 @@ function train (l, e)
          jit.flush()            -- Roll the dice on new JIT traces
       end
    elseif train_state == 'running' then
-      if l >= train_load*1.10 or l <= train_load*0.90 then
+      if (now() >= train_stamp + 2.0) and (l >= train_load*1.10 or l <= train_load*0.90) then
          -- Starting training if load has changed +/- 10%
          train_state = 'start'
          print(("[jit training: training needed with load=%.1f%%]"):format(
