@@ -390,10 +390,8 @@ function train (l, e)
       if l4 and (l > l1) and (l > l2) and (l > l3) and (l > l4) then
          -- Training complete: efficiency is greater than both of the
          -- previous two runs.
-         print(("[jit training: completed with load delta %.2f%%]"):format(
+         print(("[jit training: completed with load %.2f%%]"):format(
                100*l/(train_load or l)))
-         print("l", "l1", "l2")
-         print(math.floor(l), math.floor(l1), math.floor(l2))
          train_load = l
          train_stamp = now()
          train_state = 'running'
@@ -405,8 +403,10 @@ function train (l, e)
          jit.flush()            -- Roll the dice on new JIT traces
       end
    elseif train_state == 'running' then
-      print("load: %.2f", l)
-      if (now() >= train_stamp + 1.0) and (l >= train_load*1.20 or l <= train_load*0.80) then
+      print(("[jit training current load: %.2f%%]"):format(l*100/train_load))
+      if ((now() >= train_stamp + 5.0) or -- max 5 secs
+            ((now() >= train_stamp + 2.0) and -- min 2 secs
+               (l >= train_load*1.20 or l <= train_load*0.80))) then
          -- Starting training if load has changed +/- 10%
          train_state = 'start'
          print(("[jit training: training needed with load=%.1f%%]"):format(
