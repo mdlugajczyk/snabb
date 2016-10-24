@@ -13,7 +13,7 @@ if [ -z "$SNABB_TELNET0" ]; then
 fi
 
 if [ -z "$PACKETS" ]; then
-    export PACKETS=100e6
+    export PACKETS=500e6
     echo "Defaulting to PACKETS=$PACKETS"
 fi
 
