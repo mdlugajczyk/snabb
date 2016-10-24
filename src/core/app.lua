@@ -361,7 +361,7 @@ function trainer ()
       trainer_breathes = tonumber(counter.read(breaths))
    else
       local elapsed = now() - trainer_time
-      if elapsed > 0.100 then
+      if elapsed > 0.025 then
          local newtime = now()
          local newbreaths = tonumber(counter.read(breaths))
          local l = (newbreaths-trainer_breathes)/elapsed
@@ -398,7 +398,7 @@ function train (l, e)
          jit.flush()            -- Roll the dice on new JIT traces
       end
    elseif train_state == 'running' then
-      if (now() >= train_stamp + 2.0) and (l >= train_load*1.10 or l <= train_load*0.90) then
+      if (now() >= train_stamp + 1.0) and (l >= train_load*1.20 or l <= train_load*0.80) then
          -- Starting training if load has changed +/- 10%
          train_state = 'start'
          print(("[jit training: training needed with load=%.1f%%]"):format(
