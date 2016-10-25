@@ -376,9 +376,11 @@ local train_state = 'start'
 local train_load
 local train_stamp
 local l1, l2, l3, l4
+local train_runs
 
 function train (l, e)
    if train_state == 'start' then
+      train_runs = 0
       l1 = nil
       l2 = nil
       l3 = nil
@@ -386,12 +388,12 @@ function train (l, e)
       train_state = 'training'
       print("[jit training: started training]")
    elseif train_state == 'training' then
-      print(("[jit training: score %.2f (%.2f%%)]"):format(l, train_load and (l*100/train_load) or 0))
+--      print(("[jit training: score %.2f (%.2f%%)]"):format(l, train_load and (l*100/train_load) or 0))
       if l4 and (l > l1) and (l > l2) and (l > l3) and (l > l4) then
          -- Training complete: efficiency is greater than both of the
          -- previous two runs.
-         print(("[jit training: completed with load %.2f%%]"):format(
-               100*l/(train_load or l)))
+         print(("[jit training: completed after %d runs with load %.2f%%]"):format(
+               train_runs, 100*l/(train_load or l)))
          train_load = l
          train_stamp = now()
          train_state = 'running'
@@ -401,16 +403,16 @@ function train (l, e)
          l2 = l1
          l1 = l
          jit.flush()            -- Roll the dice on new JIT traces
+         train_runs = train_runs + 1
       end
    elseif train_state == 'running' then
-      print(("[jit training current load: %.2f%%]"):format(l*100/train_load))
-      if ((now() >= train_stamp + 5.0) or -- max 5 secs
-            ((now() >= train_stamp + 2.0) and -- min 2 secs
-               (l >= train_load*1.20 or l <= train_load*0.80))) then
+--      print(("[jit training current load: %.2f%%]"):format(l*100/train_load))
+      if (now() >= train_stamp + 2.0 and -- min 2 secs
+          (l >= train_load*1.20 or l <= train_load*0.80)) then
          -- Starting training if load has changed +/- 10%
          train_state = 'start'
-         print(("[jit training: training needed with load=%.1f%%]"):format(
-               l*100/train_load))
+--         print(("[jit training: training needed with load=%.1f%%]"):format(
+--               l*100/train_load))
       end
    else
       assert(false)
