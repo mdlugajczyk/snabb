@@ -389,7 +389,7 @@ function train (l, e)
       print("[jit training: started training]")
    elseif train_state == 'training' then
 --      print(("[jit training: score %.2f (%.2f%%)]"):format(l, train_load and (l*100/train_load) or 0))
-      if l4 and (l > l1) and (l > l2) and (l > l3) and (l > l4) then
+      if l4 and (l < l1) and (l < l2) and (l < l3) and (l < l4) then
          -- Training complete: efficiency is greater than both of the
          -- previous two runs.
          print(("[jit training: completed after %d runs with load %.2f%%]"):format(
