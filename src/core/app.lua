@@ -157,7 +157,6 @@ function with_restart (app, method)
    else
       status, result = true, method(app)
    end
-   app.event()
    return status, result
 end
 
@@ -257,8 +256,10 @@ function apply_config_actions (actions, conf)
                   name, tostring(app)))
       end
       local zone = app.zone or getfenv(class.new)._NAME or name
-      local event = define_event('trace', ("called app %s (type: %s)"):format(
-                                    name, zone))
+      local pullevent = define_event('trace', ("pulled %s (%s): $inpackets $inbytes $outpackets $outbytes"):format(
+                                        name, zone))
+      local pushevent = define_event('trace', ("pushed %s (%s): $inpackets $inbytes $outpackets $outbytes"):format(
+                                        name, zone))
       app.appname = name
       app.output = {}
       app.input = {}
@@ -266,7 +267,8 @@ function apply_config_actions (actions, conf)
       table.insert(new_app_array, app)
       app_name_to_index[name] = #new_app_array
       app.zone = zone
-      app.event = event
+      app.pullevent = pullevent
+      app.pushevent = pushevent
       if app.shm then
          app.shm.dtime = {counter, C.get_unix_time()}
          app.shm = shm.create_frame("apps/"..name, app.shm)
@@ -402,7 +404,14 @@ function breathe ()
 --         zone(app.zone) app:pull() zone()
       if app.pull and not app.dead then
          zone(app.zone)
-         with_restart(app, app.pull)
+         if tl.enabled(timeline, 'trace') then
+            local inp0, inb0, outp0, outb0 = linkstats(app)
+            with_restart(app, app.pull)
+            local inp1, inb1, outp1, outb1 = linkstats(app)
+            app.pullevent(inp1-inp0, inb1-inb0, outp1-outp0, outb1-outb0)
+         else
+            with_restart(app, app.pull)
+         end
          zone()
       end
    end
@@ -419,7 +428,14 @@ function breathe ()
             local receiver = app_array[link.receiving_app]
             if receiver.push and not receiver.dead then
                zone(receiver.zone)
-               with_restart(receiver, receiver.push)
+               if tl.enabled(timeline, 'trace') then
+                  local inp0, inb0, outp0, outb0 = linkstats(receiver)
+                  with_restart(receiver, receiver.push)
+                  local inp1, inb1, outp1, outb1 = linkstats(receiver)
+                  receiver.pushevent(inp1-inp0, inb1-inb0, outp1-outp0, outb1-outb0)
+               else
+                  with_restart(receiver, receiver.push)
+               end
                zone()
                progress = true
             end
@@ -444,10 +460,23 @@ function breathe ()
    local r = math.random()
    if     r < 0.00001 then tl.priority(timeline, 'packet')
    elseif r < 0.00010 then tl.priority(timeline, 'app')
-   elseif r < 0.00100 then tl.priority(timeline, 'trace')
-   elseif r < 0.01000 then tl.priority(timeline, 'info')
+   elseif r < 0.01000 then tl.priority(timeline, 'trace')
+   elseif r < 0.10000 then tl.priority(timeline, 'info')
    else                    tl.priority(timeline, 'warning')
    end
+end
+
+function linkstats (app)
+   local inp, inb, outp, outb = 0, 0, 0, 0
+   for i = 1, #app.input do
+      inp  = inp  + tonumber(counter.read(app.input[i].stats.rxpackets))
+      inb  = inb  + tonumber(counter.read(app.input[i].stats.rxbytes))
+   end
+   for i = 1, #app.output do
+      outp = outp + tonumber(counter.read(app.output[i].stats.txpackets))
+      outb = outb + tonumber(counter.read(app.output[i].stats.txbytes))
+   end
+   return inp, inb, outp, outb
 end
 
 function report (options)
