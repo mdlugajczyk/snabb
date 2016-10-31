@@ -61,6 +61,18 @@ function run (args)
          local t = timer.new("nfvdebugreport", engine.report_apps, debugreportinterval*1e9, 'repeating')
          timer.activate(t)
       end
+      -- Enable PMU for timeline logging
+      require("syscall").sched_setaffinity(0, {1})
+      local events = ({--"^uops_retired.all$",
+            "^mem_load_uops_retired.l1_hit$",
+            "^mem_load_uops_retired.l2_hit$",
+            "^mem_load_uops_retired.l3_hit$",
+            "^mem_load_uops_retired.l3_miss$",
+            --"^icache.misses$",
+            --"^dtlb_load_misses.miss_causes_a_walk$",
+            --"^br_misp_exec.all_branches$"
+                     })
+      require("lib.pmu").setup(events)
       if benchpackets then
          print("snabbnfv traffic starting (benchmark mode)")
          bench(pciaddr, confpath, sockpath, benchpackets)
