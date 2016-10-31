@@ -137,6 +137,12 @@ function priority (timeline, priority)
    timeline.header.priority_mask = bit.lshift(1, n+1) - 1
 end
 
+-- Check if the given priority level is currently enabled.
+function enabled (timeline, priority)
+   local n = priorities[priority]
+   return bit.band(timeline.header.priority_mask, bit.lshift(1, n)) ~= 0
+end
+
 -- Print log entries from the file
 function dump (filename,  maxentries)
    local stat, err = S.stat(filename)
@@ -151,7 +157,8 @@ function dump (filename,  maxentries)
    local size = last + 1
    -- Print column headers.
    -- Note: "-cycles" column is time delta between entries (moving backwards in time)
-   print(("%4s %4s %12s %-16s %s"):format("numa", "core", "cycles", "category", "message"))
+   --print(("%4s %4s %12s %-16s %s"):format("numa", "core", "cycles", "category", "message"))
+   print("numa;core;tsc;category;message;instructions;cycles;refcycles;l1hit;l2hit;l3hit;l3miss")
    -- Search for the first entry i.e. with lowest timestamp
    local index, stamp = 0, ring[0].tsc
    for i = 1, last do
@@ -163,10 +170,10 @@ function dump (filename,  maxentries)
    -- Print messages from first to last
    local ref_tsc = nil
    for i = 0, size-1 do
-      local previndex = (index == 0) and last or index-1
+      local previndex = (index == 0) and last or index-2
       if maxentries and i > maxentries then break end
       if ring[index].tsc == 0 then break end -- end of log
-      local timedelta = (i == 0) and '<start>' or tonumber(ring[index].tsc - ring[previndex].tsc)
+      local timedelta = (i == 0) and '0' or tonumber(ring[index].tsc - ring[previndex].tsc)
       local msgid = ring[index].msg_id
       local icategory = bit.band(0xffff, bit.rshift(msgid, 40))
       local imessage = bit.band(0xffff, bit.rshift(msgid, 16))
@@ -184,11 +191,22 @@ function dump (filename,  maxentries)
          return match:gsub("^[$]", "", 1).."("..table.remove(args)..")"
       end
       local message = format:gsub("($%w+)", subst)
+      local pmc = ffi.cast("struct timeline_entry_pmc *", ring[index+1])
+      print(("%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s"):format(
+            numa, core, ("%d"):format(tonumber(ring[index].tsc)), category, summarize(format),
+            tonumber(ring[index].msg0), tonumber(ring[index].msg1), tonumber(ring[index].msg2), tonumber(ring[index].msg3),
+            pmc.fixed2, pmc.fixed0, pmc.fixed1, pmc.general0, pmc.general1, pmc.general2, pmc.general3))
+      --[[
       print(("%-4d %-4d %12s %-16s %s"):format(
             numa, core, timedelta, category, message))
+      --]]
       ref_tsc = ring[index].tsc
-      index = (index == last) and 0 or index+1
+      index = (index == last) and 0 or index+2
    end
+end
+
+function summarize (message)
+   return message:gsub("\n.*","")
 end
 
 ------------------------------------------------------------
