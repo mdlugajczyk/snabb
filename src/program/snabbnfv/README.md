@@ -52,7 +52,9 @@ port := { port_id        = <id>,          -- A unique string
           tunnel         = <tunnel-conf>,
           crypto         = <crypto-conf>,
           rx_police      = <n>,           -- Allowed input rate in Gbps
-          tx_police      = <n> }          -- Allowed output rate in Gbps
+          tx_police      = <n>,           -- Allowed output rate in Gbps
+          core           = <n|boolean> }  -- CPU core to pin on, or boolean
+                                          -- to toggle NUMA node binding
 ```
 
 The `tunnel` section deviates a little from `SimpleKeyedTunnel`'s

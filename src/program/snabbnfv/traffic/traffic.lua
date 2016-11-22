@@ -24,50 +24,56 @@ local long_opts = {
 
 function run (args)
    local opt = {}
-   local benchpackets
-   local linkreportinterval = 0
-   local loadreportinterval = 1
-   local debugreportinterval = 0
-   function opt.B (arg) benchpackets = tonumber(arg)      end
+   local worker_args = {
+      linkreportinterval = 0,
+      loadreportinterval = 1,
+      debugreportinterval = 0
+   }
+   function opt.B (arg) worker_args.benchpackets = tonumber(arg) end
    function opt.h (arg) print(short_usage()) main.exit(1) end
    function opt.H (arg) print(long_usage())  main.exit(1) end
-   function opt.k (arg) linkreportinterval = tonumber(arg) end
-   function opt.l (arg) loadreportinterval = tonumber(arg) end
-   function opt.D (arg) debugreportinterval = tonumber(arg) end
-   function opt.b (arg) engine.busywait = true              end
+   function opt.k (arg) worker_args.linkreportinterval = tonumber(arg) end
+   function opt.l (arg) worker_args.loadreportinterval = tonumber(arg) end
+   function opt.D (arg) worker_args.debugreportinterval = tonumber(arg) end
+   function opt.b (arg) worker_args.busywait = true end
    args = lib.dogetopt(args, opt, "hHB:k:l:D:b", long_opts)
    if #args == 3 then
-      local pciaddr, confpath, sockpath = unpack(args)
-      if pciaddr == "soft" then pciaddr = nil end
-      if pciaddr then
-         local ok, info = pcall(pci.device_info, pciaddr)
-         if not ok then
-            print("Error: device not found " .. pciaddr)
-            os.exit(1)
-         end
-         if not info.driver then
-            print("Error: no driver for device " .. pciaddr)
-            os.exit(1)
-         end
+      local worker_args.pciaddr, confpath, worker_args.sockpath = unpack(args)
+      local ok, info = pcall(pci.device_info, worker_args.pciaddr)
+      if not ok then
+         print("Error: device not found " .. worker_args.pciaddr)
+         os.exit(1)
       end
-      if loadreportinterval > 0 then
-         local t = timer.new("nfvloadreport", engine.report_load, loadreportinterval*1e9, 'repeating')
-         timer.activate(t)
+      if not info.driver then
+         print("Error: no driver for device " .. worker_args.pciaddr)
+         os.exit(1)
       end
-      if linkreportinterval > 0 then
-         local t = timer.new("nfvlinkreport", engine.report_links, linkreportinterval*1e9, 'repeating')
-         timer.activate(t)
-      end
-      if debugreportinterval > 0 then
-         local t = timer.new("nfvdebugreport", engine.report_apps, debugreportinterval*1e9, 'repeating')
-         timer.activate(t)
-      end
-      if benchpackets then
-         print("snabbnfv traffic starting (benchmark mode)")
-         bench(pciaddr, confpath, sockpath, benchpackets)
+      if worker_args.benchpackets then
+         print("Loading " .. confpath)
+         local c, workers = nfvconfig.load_ports(confpath)
+         engine.configure(c)
+         -- start workers
+         -- run engine until all workers stopped
       else
-         print("snabbnfv traffic starting")
-         traffic(pciaddr, confpath, sockpath)
+         local mtime = 0
+         local needs_reconfigure = true
+         function check_for_reconfigure()
+            needs_reconfigure = C.stat_mtime(confpath) ~= mtime
+         end
+         timer.activate(timer.new("reconf", check_for_reconfigure, 1e9, 'repeating'))
+         while true do
+            needs_reconfigure = false
+            print("Loading " .. confpath)
+            mtime = C.stat_mtime(confpath)
+            if mtime == 0 then
+               print(("WARNING: File '%s' does not exist."):format(confpath))
+            end
+            local c, workers = nfvconfig.load_ports(confpath)
+            engine.configure(c)
+            -- start workers
+            engine.main({done=function() return needs_reconfigure end})
+            -- stop workers
+         end
       end
    else
       print("Wrong number of arguments: " .. tonumber(#args))
@@ -80,46 +86,53 @@ end
 function short_usage () return (usage:gsub("%s*CONFIG FILE FORMAT:.*", "")) end
 function long_usage () return usage end
 
--- Run in real traffic mode.
-function traffic (pciaddr, confpath, sockpath)
-   engine.log = true
-   local mtime = 0
-   local needs_reconfigure = true
-   function check_for_reconfigure()
-      needs_reconfigure = C.stat_mtime(confpath) ~= mtime
+function nfv_worker (args, ports, core)
+   engine.busywait = args.busywait
+   local voice = "worker: "
+   if type(core) == 'number' then
+      numa.bind_to_cpu(core)
+      voice = "worker("..core.."): "
+   elseif core then
+      numa.bind_to_numa_node(numa.pci_get_numa_node(args.pciaddr))
    end
-   timer.activate(timer.new("reconf", check_for_reconfigure, 1e9, 'repeating'))
-   -- Flush logs every second.
-   timer.activate(timer.new("flush", io.flush, 1e9, 'repeating'))
-   timer.activate(ingress_drop_monitor.new({action='warn'}):timer())
-   while true do
-      needs_reconfigure = false
-      print("Loading " .. confpath)
-      mtime = C.stat_mtime(confpath)
-      if mtime == 0 then
-         print(("WARNING: File '%s' does not exist."):format(confpath))
+   local function say (report_fn)
+      return function () io.write(voice); report_fn() end
+   end
+   if args.loadreportinterval > 0 then
+      local t = timer.new("nfvloadreport", say(engine.report_load), args.loadreportinterval*1e9, 'repeating')
+      timer.activate(t)
+   end
+   if args.linkreportinterval > 0 then
+      local t = timer.new("nfvlinkreport", say(engine.report_links), args.linkreportinterval*1e9, 'repeating')
+      timer.activate(t)
       end
-      engine.configure(nfvconfig.load(confpath, pciaddr, sockpath))
-      engine.main({done=function() return needs_reconfigure end})
+   if args.debugreportinterval > 0 then
+      local t = timer.new("nfvdebugreport", say(engine.report_apps), args.debugreportinterval*1e9, 'repeating')
+      timer.activate(t)
+   end
+   if args.benchpackets then
+      print(voice.."starting (benchmark mode)")
+      bench(args.pciaddr, ports, args.sockpath, args.npackets)
+   else
+      print(voice.."starting")
+      traffic(args.pciaddr, ports, args.sockpath)
    end
 end
 
--- Run in benchmark mode.
-function bench (pciaddr, confpath, sockpath, npackets)
-   npackets = tonumber(npackets)
-   local ports = dofile(confpath)
-   local nic, bench
-   if pciaddr then
-      nic = (nfvconfig.port_name(ports[1])).."_NIC"
-   else
-      nic = "BenchSink"
-      bench = { src="52:54:00:00:00:02", dst="52:54:00:00:00:01", sizes = {60}}
-   end
-   engine.log = true
-   engine.Hz = false
+-- Run in real traffic mode.
+function traffic (pciaddr, ports, sockpath)
+   -- Flush logs every second.
+   timer.activate(timer.new("flush", io.flush, 1e9, 'repeating'))
+   timer.activate(ingress_drop_monitor.new({action='warn'}):timer())
+   engine.configure(nfvconfig.ports_config(ports, pciaddr, sockpath))
+   engine.main()
+end
 
-   print("Loading " .. confpath)
-   engine.configure(nfvconfig.load(confpath, pciaddr, sockpath, bench))
+-- Run in benchmark mode.
+function bench (pciaddr, ports, sockpath, npackets)
+   local nic = (nfvconfig.port_name(ports[1])).."_NIC"
+
+   engine.configure(nfvconfig.ports_config(ports, pciaddr, sockpath))
 
    -- From designs/nfv
    local start, packets, bytes = 0, 0, 0

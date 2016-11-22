@@ -9,13 +9,13 @@ module snabb-nfvconfig-v1 {
   contact "snabb-devel@googlegroups.com";
 
   description
-    "This module describes the configuration of SnabbNFV.";
+    "This module describes the configuration of Snabb NFV.";
 
-  revision "2016-10-27" {
+  revision "2016-11-22" {
     description
-     "Initial version that reflects Snabb Switch 2016.11 “Babaco”.";
+     "Updated version that reflects multi process Snabb NFV.";
     reference
-      "https://github.com/snabbco/snabb/releases/tag/v2016.11";
+      "https://github.com/eugeneia/snabb/tree/nfv2016";
   }
 
   typedef pcap-filter {
@@ -83,6 +83,17 @@ module snabb-nfvconfig-v1 {
       type string;
       mandatory true;
       description "The unique identifier of the port.";
+    }
+
+    leaf core {
+      type union {
+        type uint64;
+        type boolean;
+      }
+      description
+        "Either an unsigned integer designating the CPU core to pin the port
+      process on, or a boolean indicating if the port process is to be bound to
+      the NUMA node with affinity to the underlying PCI device (NIC).";
     }
 
     leaf mac_address {

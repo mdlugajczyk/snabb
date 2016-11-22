@@ -21,27 +21,33 @@ function port_name (port_config)
    return port_config.port_id:gsub("-", "_")
 end
 
--- Compile app configuration from <file> for <pciaddr> and vhost_user <socket>.
--- Optionally install <soft_bench> source and sink. Returns configuration.
-function load (file, pciaddr, sockpath, soft_bench)
+local NIC_suffix = "_NIC"
+
+-- Load NFV configuration <file> and return controller configuration for
+-- <pciaddr> and ports for cores
+function load_ports (file, pciaddr)
    local ports = lib.load_conf(file)
    local c = config.new()
-   local NIC_suffix = "_NIC"
+   -- Configure IO controller
    local queues = {}
    for _, port in ipairs(ports) do
       local NIC = port_name(port)..NIC_suffix
       queues[NIC] = {macaddr = port.mac_address, vlan = port.vlan}
    end
-   -- Set up virtual packet generator if requested.
-   if soft_bench then
-      assert(not queues["__SoftBench"])
-      queues["__SoftBench"] {macaddr = soft_bench.src}
-      config.app(c, "BenchSource", Synth, io.bench)
-      config.app(c, "BenchSink", Sink)
-      config.link(c, "BenchSource.output -> __SoftBench.rx")
-      config.link(c, "__SoftBench.tx -> BenchSink.input")
+   config.app(c, "IOControl", IOControl, {type='pci', device=pciaddr, queues=queues})
+   -- Organize ports by worker
+   local workers = {}
+   for _, port in ipairs(ports) do
+      local worker = port.core or false
+      workers[worker] = workers[worker] or {}
+      table.insert(workers[worker], port)
    end
-   config.app(c, "IO", IO, {type=(pciaddr and 'pci'), device=pciaddr, queues=queues})
+   return c, workers
+end
+
+-- Compile app network for <ports>, <pciaddr>, and VhostUser <socket>.
+function ports_config (ports, pciaddr, sockpath)
+   local c = config.new()
    for i,t in ipairs(ports) do
       -- Backwards compatibity / deprecated fields
       for deprecated, current in pairs({tx_police_gbps = "tx_police",
@@ -126,8 +132,8 @@ function load (file, pciaddr, sockpath, soft_bench)
          config.link(c, RxLimit..".output -> "..VM_rx)
          VM_rx = RxLimit..".input"
       end
-      -- Finally, connect ends to I/O port
       local NIC = name..NIC_suffix
+      config.app(c, IO, NIC, {type='pci', device=pciaddr, queue=name})
       config.link(c, NIC..".tx".." -> "..VM_rx)
       config.link(c, VM_tx.." -> "..NIC..".rx")
    end
@@ -154,7 +160,10 @@ function selftest ()
                               "program/snabbnfv/test_fixtures/nfvconfig/scale_change/y"})
    do
       print("testing:", confpath)
-      engine.configure(load(confpath, pcideva, "/dev/null"))
+      local mc, workers = load_ports(confpath, pcideva)
+      local wc = ports_config(workers[false], pcideva, "/dev/null")
+      wc.apps["IOControl"] = mc.apps["IOControl"]
+      engine.configure(wc)
       engine.main({duration = 0.25})
    end
    local c = load("program/snabbnfv/test_fixtures/nfvconfig/test_functions/deprecated.port", pcideva, "/dev/null")
