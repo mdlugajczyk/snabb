@@ -16,7 +16,7 @@ local C   = ffi.C
 -- (e.g. FFI type name conflict between Snabb and ljsyscall)
 local S = require("syscall")
 
-require("lib.lua.strict")
+-- require("lib.lua.strict")
 require("lib.lua.class")
 
 -- ljsyscall returns error as a cdata instead of a string, and the standard
@@ -42,7 +42,7 @@ debug_on_error = _G.developer_debug
 
 function main ()
    zone("startup")
-   require "lib.lua.strict"
+--   require "lib.lua.strict"
    -- Warn on unsupported platforms
    if ffi.arch ~= 'x64' or ffi.os ~= 'Linux' then
       error("fatal: "..ffi.os.."/"..ffi.arch.." is not a supported platform\n")
