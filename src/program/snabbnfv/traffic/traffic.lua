@@ -3,6 +3,7 @@
 module(..., package.seeall)
 
 local lib = require("core.lib")
+local worker = require("core.worker")
 local nfvconfig = require("program.snabbnfv.nfvconfig")
 local usage = require("program.snabbnfv.traffic.README_inc")
 local ffi = require("ffi")
@@ -38,22 +39,37 @@ function run (args)
    function opt.b (arg) worker_args.busywait = true end
    args = lib.dogetopt(args, opt, "hHB:k:l:D:b", long_opts)
    if #args == 3 then
-      local worker_args.pciaddr, confpath, worker_args.sockpath = unpack(args)
-      local ok, info = pcall(pci.device_info, worker_args.pciaddr)
+      local pciaddr, confpath, sockpath = unpack(args)
+      local ok, info = pcall(pci.device_info, pciaddr)
       if not ok then
-         print("Error: device not found " .. worker_args.pciaddr)
+         print("Error: device not found " .. pciaddr)
          os.exit(1)
       end
       if not info.driver then
-         print("Error: no driver for device " .. worker_args.pciaddr)
+         print("Error: no driver for device " .. pciaddr)
          os.exit(1)
       end
+      worker_args.pciaddr = pciaddr
+      worker_args.sockpath = sockpath
       if worker_args.benchpackets then
          print("Loading " .. confpath)
-         local c, workers = nfvconfig.load_ports(confpath)
+         local c, workers = nfvconfig.load_ports(confpath, pciaddr)
          engine.configure(c)
-         -- start workers
-         -- run engine until all workers stopped
+         for core, ports in pairs(workers) do
+            worker.start(
+               worker_name(core),
+               'require("program.snabbnfv.traffic.traffic").nfv_worker('..
+                  lib.conf_string(worker_args)..','..
+                  lib.conf_string(ports)..','..
+                  tostring(core)..')'
+            )
+         end
+         local function workers_done ()
+            for _, status in pairs(worker.status()) do
+               if status.alive then return false end
+            end
+         end
+         engine.main({done = workers_done})
       else
          local mtime = 0
          local needs_reconfigure = true
@@ -68,11 +84,21 @@ function run (args)
             if mtime == 0 then
                print(("WARNING: File '%s' does not exist."):format(confpath))
             end
-            local c, workers = nfvconfig.load_ports(confpath)
+            local c, workers = nfvconfig.load_ports(confpath, pciaddr)
             engine.configure(c)
-            -- start workers
+            for core, ports in pairs(workers) do
+               worker.start(
+                  worker_name(core),
+                  'require("program.snabbnfv.traffic.traffic").nfv_worker('..
+                     lib.conf_string(worker_args)..','..
+                     lib.conf_string(ports)..','..
+                     tostring(core)..')'
+               )
+            end
             engine.main({done=function() return needs_reconfigure end})
-            -- stop workers
+            for name, status in pairs(worker.status()) do
+               if status.alive then worker.stop(name) end
+            end
          end
       end
    else
@@ -86,15 +112,20 @@ end
 function short_usage () return (usage:gsub("%s*CONFIG FILE FORMAT:.*", "")) end
 function long_usage () return usage end
 
+function worker_name (core)
+   if type(core) == 'number' then return "worker("..core..")"
+   elseif  core              then return "worker(bound)"
+   else                           return "worker(unbound)"    end
+end
+
 function nfv_worker (args, ports, core)
    engine.busywait = args.busywait
-   local voice = "worker: "
    if type(core) == 'number' then
       numa.bind_to_cpu(core)
-      voice = "worker("..core.."): "
    elseif core then
       numa.bind_to_numa_node(numa.pci_get_numa_node(args.pciaddr))
    end
+   local voice = worker_name(core)..": "
    local function say (report_fn)
       return function () io.write(voice); report_fn() end
    end
@@ -112,7 +143,7 @@ function nfv_worker (args, ports, core)
    end
    if args.benchpackets then
       print(voice.."starting (benchmark mode)")
-      bench(args.pciaddr, ports, args.sockpath, args.npackets)
+      bench(args.pciaddr, ports, args.sockpath, args.benchpackets)
    else
       print(voice.."starting")
       traffic(args.pciaddr, ports, args.sockpath)

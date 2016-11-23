@@ -136,7 +136,7 @@ function ports_config (ports, pciaddr, sockpath)
             assert(#ports == 1, "multiple ports defined but promiscuous mode requested for port: "..name)
             vmdq = false
          end
-         config.app(c, NIC, require(device.driver).driver,
+         config.app(c, NIC, require(driver).driver,
                     {pciaddr = pciaddr,
                      vmdq = vmdq,
                      macaddr = t.mac_address,
