@@ -118,6 +118,45 @@ function load_string (string)
    return loadstring("return "..string)()
 end
 
+-- Serialize value to string.
+function conf_string (value)
+   local s = ""
+   local indent = 0
+   local function append_indent ()
+      for i = 1, indent do s = s .. " " end
+   end
+   local function append_value (value)
+      local  type = type(value)
+      if     type == 'table'  then
+         indent = indent + 2
+         s = s .. "{\n"
+         if #value == 0 then
+            for key, value in pairs(value) do
+               append_indent()
+               s = s .. key .. " = "
+               append_value(value)
+               s = s .. ",\n"
+            end
+         else
+            for _, value in ipairs(value) do
+               append_indent()
+               append_value(value)
+               s = s .. ",\n"
+            end
+         end
+         indent = indent - 2
+         append_indent()
+         s = s .. "}"
+      elseif type == 'string' then
+         s = s .. ("%q"):format(value)
+      else
+         s = s .. ("%s"):format(value)
+      end
+   end
+   append_value(value)
+   return s
+end
+
 -- Read a Lua conf from file and return value.
 function load_conf (file)
    return dofile(file)
@@ -125,41 +164,9 @@ end
 
 -- Store Lua representation of value in file.
 function store_conf (file, value)
-   local indent = 0
-   local function print_indent (stream)
-      for i = 1, indent do stream:write(" ") end
-   end
-   local function print_value (value, stream)
-      local  type = type(value)
-      if     type == 'table'  then
-         indent = indent + 2
-         stream:write("{\n")
-         if #value == 0 then
-            for key, value in pairs(value) do
-               print_indent(stream)
-               stream:write(key, " = ")
-               print_value(value, stream)
-               stream:write(",\n")
-            end
-         else
-            for _, value in ipairs(value) do
-               print_indent(stream)
-               print_value(value, stream)
-               stream:write(",\n")
-            end
-         end
-         indent = indent - 2
-         print_indent(stream)
-         stream:write("}")
-      elseif type == 'string' then
-         stream:write(("%q"):format(value))
-      else
-         stream:write(("%s"):format(value))
-      end
-   end
    local stream = assert(io.open(file, "w"))
    stream:write("return ")
-   print_value(value, stream)
+   stream:write(conf_string(value))
    stream:write("\n")
    stream:close()
 end
