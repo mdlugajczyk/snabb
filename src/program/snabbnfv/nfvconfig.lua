@@ -2,15 +2,12 @@
 
 module(...,package.seeall)
 
-local IO = require("apps.io.common").IO
 local VhostUser = require("apps.vhost.vhost_user").VhostUser
 local PcapFilter = require("apps.packet_filter.pcap_filter").PcapFilter
 local RateLimiter = require("apps.rate_limiter.rate_limiter").RateLimiter
 local nd_light = require("apps.ipv6.nd_light").nd_light
 local L2TPv3 = require("apps.keyed_ipv6_tunnel.tunnel").SimpleKeyedTunnel
 local AES128gcm = require("apps.ipsec.esp").AES128gcm
-local Synth = require("apps.test.synth").Synth
-local Sink = require("apps.basic.basic_apps").Sink
 local pci = require("lib.hardware.pci")
 local ffi = require("ffi")
 local C = ffi.C
@@ -21,20 +18,16 @@ function port_name (port_config)
    return port_config.port_id:gsub("-", "_")
 end
 
-local NIC_suffix = "_NIC"
-
 -- Load NFV configuration <file> and return controller configuration for
 -- <pciaddr> and ports for cores
 function load_ports (file, pciaddr)
    local ports = lib.load_conf(file)
    local c = config.new()
-   -- Configure IO controller
-   local queues = {}
-   for _, port in ipairs(ports) do
-      local NIC = port_name(port)..NIC_suffix
-      queues[NIC] = {macaddr = port.mac_address, vlan = port.vlan}
+   -- Configure NIC queues if applicable
+   local driver = assert(pci.device_info(pciaddr).driver, "Unsupported device: "..pciaddr)
+   if driver == 'apps.mellanox.connectx4' then
+      -- XXX - Configure ConnectX4 controller app here
    end
-   config.app(c, "IOControl", IOControl, {type='pci', device=pciaddr, queues=queues})
    -- Organize ports by worker
    local workers = {}
    for _, port in ipairs(ports) do
@@ -132,8 +125,25 @@ function ports_config (ports, pciaddr, sockpath)
          config.link(c, RxLimit..".output -> "..VM_rx)
          VM_rx = RxLimit..".input"
       end
-      local NIC = name..NIC_suffix
-      config.app(c, IO, NIC, {type='pci', device=pciaddr, queue=name})
+      local NIC = name.."_NIC"
+      local driver = assert(pci.device_info(pciaddr).driver, "Unsupported device: "..pciaddr)
+      if driver == 'apps.mellanox.connectx4' then
+         -- XXX - Configure ConnectX4 queue app here
+      elseif (driver == 'apps.intel.intel_app' or
+              driver == 'apps.solarflare.solarflare') then
+         local vmdq = true
+         if not t.mac_address then
+            assert(#ports == 1, "multiple ports defined but promiscuous mode requested for port: "..name)
+            vmdq = false
+         end
+         config.app(c, NIC, require(device.driver).driver,
+                    {pciaddr = pciaddr,
+                     vmdq = vmdq,
+                     macaddr = t.mac_address,
+                     vlan = t.vlan})
+      else
+         error("Unsupported driver: "..driver)
+      end
       config.link(c, NIC..".tx".." -> "..VM_rx)
       config.link(c, VM_tx.." -> "..NIC..".rx")
    end
@@ -160,13 +170,15 @@ function selftest ()
                               "program/snabbnfv/test_fixtures/nfvconfig/scale_change/y"})
    do
       print("testing:", confpath)
-      local mc, workers = load_ports(confpath, pcideva)
-      local wc = ports_config(workers[false], pcideva, "/dev/null")
-      wc.apps["IOControl"] = mc.apps["IOControl"]
-      engine.configure(wc)
+      local m, workers = load_ports(confpath, pcideva)
+      local w = ports_config(workers[false], pcideva, "/dev/null")
+      engine.configure(m)
+      engine.main({duration = 0.25})
+      engine.configure(w)
       engine.main({duration = 0.25})
    end
-   local c = load("program/snabbnfv/test_fixtures/nfvconfig/test_functions/deprecated.port", pcideva, "/dev/null")
-   assert(c.apps["Test_TxLimit"])
-   assert(c.apps["Test_RxLimit"])
+   local m, workers = load_ports("program/snabbnfv/test_fixtures/nfvconfig/test_functions/deprecated.port", pcideva, "/dev/null")
+   local w = ports_config(workers[false], pcideva, "/dev/null")
+   assert(w.apps["Test_TxLimit"])
+   assert(w.apps["Test_RxLimit"])
 end
