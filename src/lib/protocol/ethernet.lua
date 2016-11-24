@@ -57,6 +57,16 @@ function ethernet:pton (p)
    return result
 end
 
+-- Convert printable address to integer
+function ethernet:ptoi (p)
+   local bytes = self:pton(p)
+   local acc = 0
+   for i = 0, 5 do
+      acc = (acc * 256) + tonumber(bytes[i])
+   end
+   return acc
+end
+
 -- Convert numeric address to printable
 function ethernet:ntop (n)
    local p = {}
