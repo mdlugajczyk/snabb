@@ -119,7 +119,7 @@ function worker_name (core)
 end
 
 function nfv_worker (args, ports, core)
-   engine.busywait = args.busywait
+   if args.busywait then engine.busywait = true end
    if type(core) == 'number' then
       numa.bind_to_cpu(core)
    elseif core then
