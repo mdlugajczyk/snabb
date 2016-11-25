@@ -150,30 +150,25 @@ function ConnectX4:new (conf)
       --
       -- Snabb processes will use this information to take ownership
       -- of the queue to send and receive packets.
-      local basepath = "/pci/"..pciaddress.."/"..queuename
-      local sendpath = basepath.."/send"
-      local recvpath = basepath.."/recv"
+      local shmpath = "pci/"..pciaddress.."/"..queuename
       local u64 = function (x) return ffi.cast("uint64_t", x) end
-      shm.create_frame(sendpath,
-                       {lock     = {counter},
-                        sqn      = {counter, sqn},
-                        wq       = {counter, u64(swq)},
-                        wqsize   = {counter, sendq_size},
-                        cqn      = {counter, send_cq.cqn},
-                        cqe      = {counter, u64(send_cq.cqe)},
-                        doorbell = {counter, u64(wq_doorbell)},
-                        uar_page = {counter, uar},
-                        rlkey    = {counter, rlkey}})
-      shm.create_frame(recvpath,
-                       {lock     = {counter},
-                        rqn      = {counter, rqn},
-                        wq       = {counter, u64(rwq)},
-                        wqsize   = {counter, recvq_size},
-                        cqn      = {counter, recv_cq.cqn},
-                        cqe      = {counter, u64(recv_cq.cqe)},
-                        doorbell = {counter, u64(wq_doorbell)},
-                        uar_page = {counter, uar},
-                        rlkey    = {counter, rlkey}})
+      shm.create_frame(shmpath,
+                       {online        = {counter, 1},
+                        send_sqn      = {counter, sqn},
+                        send_wq       = {counter, u64(swq)},
+                        send_wqsize   = {counter, sendq_size},
+                        send_cqn      = {counter, send_cq.cqn},
+                        send_cqe      = {counter, u64(send_cq.cqe)},
+                        send_doorbell = {counter, u64(wq_doorbell)},
+                        send_uar_page = {counter, uar},
+                        recv_rqn      = {counter, rqn},
+                        recv_wq       = {counter, u64(rwq)},
+                        recv_wqsize   = {counter, recvq_size},
+                        recv_cqn      = {counter, recv_cq.cqn},
+                        recv_cqe      = {counter, u64(recv_cq.cqe)},
+                        recv_doorbell = {counter, u64(wq_doorbell)},
+                        recv_uar_page = {counter, uar},
+                        rlkey         = {counter, rlkey}})
    end
 
    --local tir = hca:create_tir_direct(rqlist[1], tdomain)
@@ -752,51 +747,82 @@ IO.__index = IO
 
 function IO:new (conf)
    local self = setmetatable({}, self)
+
    local pciaddress = pci.qualified(conf.pciaddress)
+   local queue = conf.queue
    local mmio, fd = pci.map_pci_memory(pciaddress, 0, false)
 
-   local queue = conf.queue
+   local online = false      -- True when queue is up and running
+   local frame               -- shm frame containing queue control information
+   local sq                  -- SQ send queue object
+   local rq                  -- RQ receive queue object
+   local open_throttle =     -- Timer to throttle shm open attempts (10ms)
+      lib.throttle(0.01)
 
-   local basepath = "/pci/"..pciaddress.."/"..queue
-   local sendpath = basepath.."/send"
-   local recvpath = basepath.."/recv"
-      
-   local send = shm.open_frame(sendpath)
-   local recv = shm.open_frame(recvpath)
+   -- Close the queue mapping.
+   local function close ()
+      counter.delete_frame(send)
+      counter.delete_frame(recv)
+      send, recv = nil, nil
+      online = false
+   end
 
-   self.sq = SQ:new(tonumber(counter.read(send.sqn)),
-                    counter.read(send.wq),
-                    tonumber(counter.read(send.wqsize)),
-                    counter.read(send.doorbell),
-                    mmio,
-                    tonumber(counter.read(send.uar_page)),
-                    tonumber(counter.read(send.rlkey)),
-                    counter.read(send.cqe))
-   self.rq = RQ:new(counter.read(recv.rqn),
-                    counter.read(recv.wq),
-                    tonumber(counter.read(recv.wqsize)),
-                    counter.read(recv.doorbell),
-                    tonumber(counter.read(recv.rlkey)),
-                    counter.read(recv.cqe))
+   -- Open the queue mapping.
+   local function open ()
+      local shmpath = "pci/"..pciaddress.."/"..queue
+      if shm.exists(shmpath.."/online.counter") then
+         frame = shm.open_frame(shmpath)
+         
+         local function c (ctr) return counter.read(ctr) end -- read counter (u64)
+         local function n (ctr) return tonumber(c(ctr)) end  -- ... as Lua num
+
+         sq = SQ:new(n(frame.send_sqn),
+                     c(frame.send_wq),
+                     n(frame.send_wqsize),
+                     c(frame.send_doorbell),
+                     mmio,
+                     n(frame.send_uar_page),
+                     n(frame.rlkey),
+                     c(frame.send_cqe))
+         rq = RQ:new(n(frame.recv_rqn),
+                     c(frame.recv_wq),
+                     n(frame.recv_wqsize),
+                     c(frame.recv_doorbell),
+                     n(frame.rlkey),
+                     c(frame.recv_cqe))
+         online = true
+      end
+   end
+
+   -- Check for online/offline queue state change.
+   -- Return true if the queue is online.
+   local function check_online ()
+      if online and counter.read(frame.online) == 0 then
+         close()
+      end
+      if not online and open_throttle() then
+         open()
+      end
+      return online
+   end
+
+   -- Send packets to the NIC
+   function self:push ()
+      if check_online() then
+         sq:transmit(self.input.input)
+         sq:reclaim()
+      end
+   end
+
+   -- Receive packets from the NIC.
+   function self:pull ()
+      if self.output.output and check_online() then
+         rq:receive(self.output.output)
+         rq:refill()
+      end
+   end
+
    return self
-end
-
-function IO:push ()
-   local l = self.input.input
-   if l == nil then return end
-   self.sq:transmit(l)
-   self.sq:reclaim()
-end
-
-function IO:pull ()
-   -- Free transmitted packets
-   self.sq:reclaim()
-   -- Input received packets
-   local l = self.output.output
-   if l == nil then return end
-   self.rq:refill()
-   self.rq:ring_doorbell()
-   self.rq:receive(l)
 end
 
 ---------------------------------------------------------------
@@ -844,6 +870,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
 
    -- Refill with buffers
    function self:refill ()
+      local notify = false      -- have to notify NIC with doorbell ring?
       while packets[next_buffer % wqsize] == nil do
          local p = packet.allocate()
          packets[next_buffer % wqsize] = p
@@ -854,6 +881,10 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
          rwqe.address_high = bswap(tonumber(shr(phy, 32)))
          rwqe.address_low  = bswap(tonumber(band(phy, 0xFFFFFFFF)))
          next_buffer = (next_buffer + 1) % 65536
+      end
+      if notify then
+         -- ring doorbell
+         doorbell[0].receive = bswap(next_buffer)
       end
    end
 
@@ -1552,14 +1583,16 @@ function selftest ()
       os.exit(engine.test_skipped_code)
    end
 
-   local nic0 = ConnectX4:new{pciaddress = pcidev0, queues = {'a'}}
-   local nic1 = ConnectX4:new{pciaddress = pcidev1, queues = {'b'}}
    local io0 = IO:new({pciaddress = pcidev0, queue = 'a'})
    local io1 = IO:new({pciaddress = pcidev1, queue = 'b'})
    io0.input  = { input = link.new('input0') }
    io0.output = { output = link.new('output0') }
    io1.input  = { input = link.new('input1') }
    io1.output = { output = link.new('output1') }
+   -- Exercise the IO apps before the NIC is initialized.
+   io0:pull() io0:push() io1:pull() io1:push()
+   local nic0 = ConnectX4:new{pciaddress = pcidev0, queues = {'a'}}
+   local nic1 = ConnectX4:new{pciaddress = pcidev1, queues = {'b'}}
 
    print("selftest: waiting for both links up")
    while (nic0.hca:query_vport_state().oper_state ~= 1) or
