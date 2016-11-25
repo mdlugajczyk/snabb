@@ -44,7 +44,9 @@ CONFIG FILE FORMAT:
                 tunnel         = <tunnel-conf>,
                 crypto         = <crypto-conf>,
                 rx_police      = <n>,           -- Allowed input rate in Gbps
-                tx_police      = <n> }          -- Allowed output rate in Gbps
+                tx_police      = <n>,           -- Allowed output rate in Gbps
+                core           = <n|nil> }      -- Core to pin on, or boolean
+                                                -- to toggle NUMA node binding
 
   The tunnel section deviates a little from SimpleKeyedTunnel's
   terminology:
