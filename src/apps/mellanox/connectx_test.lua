@@ -57,7 +57,7 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
    -- Create diverse packet payload templates
    print("creating payloads...")
    local payload = {}
-   local npayloads = 10000
+   local npayloads = 10
    for i = 1, npayloads do
       local p = packet.allocate()
       payload[i] = p
@@ -66,20 +66,20 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
 
       -- MAC destination
       local r = math.random()
---[[
       if     r < 0.10 then          -- 10% of packets are broadcast
          ffi.fill(p.data, 6, 0xFF)
---      elseif r < 0.20 then          -- 10% are unicast to random destinations
---         for i = 1, 5 do p.data[i] = math.random(256) - 1 end
+      elseif r < 0.20 then          -- 10% are unicast to random destinations
+         for i = 1, 5 do p.data[i] = math.random(256) - 1 end
       else                          -- rest are unicast to known mac
-         --p.data[5] = between(1, macs)
+         p.data[5] = between(1, macs)
       end
---]]
+
+      p.data[12] = 0x08 -- ipv4
+
       -- MAC source
       --for i = 7, 11 do p.data[i] = math.random(256) - 1 end
       -- 802.1Q
-      p.data[12] = 0x08
-      --p.data[12] = 0x81
+       --p.data[12] = 0x81
       --p.data[15] = between(1, vlans+1) -- vlan id can be out of expected range
       --p.data[16] = 0x08 -- ipv4
       -- Random payload
@@ -88,6 +88,7 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
          p.data[i] = math.random(256) - 1
       end
       --]]
+      print(lib.hexdump(ffi.string(p.data, 32)))
    end
    -- Wait for linkup on both ports
    print("waiting for linkup...")
@@ -108,6 +109,7 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
             end
          end
       end
+      C.usleep(1000)
       -- Simulate breathing
       for _, app in pairs(io0) do app:pull() app:push() end
       for _, app in pairs(io1) do app:pull() app:push() end
@@ -145,10 +147,10 @@ end
 
 -- Return a random number between min and max (inclusive.)
 function between (min, max)
-   return min + math.random(max) - 1
+   return min + math.random(max-min) - 1
 end
 
 function selftest ()
-   switch("02:00.0", "82:00.0", 1e5, 1, 60, 1500, 5, 10, 2, 2, 1)
+   switch("02:00.0", "82:00.0", 1e3, 1, 60, 1500, 5, 10, 2, 1, 1)
 end
 

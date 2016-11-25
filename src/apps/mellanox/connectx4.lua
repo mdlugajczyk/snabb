@@ -183,16 +183,18 @@ function ConnectX4:new (conf)
    -- Just a "wildcard" flow group to send RX packets to the receive queue.
    --
    local rxtable = hca:create_root_flow_table(NIC_RX)
-   local macvlan = false
+   --debug_trace = true
+   local macvlan = true
    if macvlan then
       local flow_group_id = hca:create_flow_group_macvlan(rxtable, NIC_RX, 0, #conf.queues-1)
       local rule = 0
       for _, queue in ipairs(conf.queues) do
          --local rqt = hca:create_rqt(rqlist)
+         print("rqn", rqs[queue.id])
          local tir = hca:create_tir_direct(rqs[queue.id], tdomain)
-         print("setting up flow ", queue.id, rule, queue.mac, queue.vlan, tir, rqs[queue.id])
+         print("setting up flow for tir ", tir, queue.id, rule, queue.mac, queue.vlan, tir, rqs[queue.id])
          hca:set_flow_table_entry_macvlan(rxtable, NIC_RX, flow_group_id, rule, tir,
-                                          ethernet:ptoi(queue.mac), queue.vlan)
+                                          0x01, queue.vlan)
          rule = rule + 1
       end
    else
@@ -202,6 +204,7 @@ function ConnectX4:new (conf)
       hca:set_flow_table_entry_wildcard(rxtable, NIC_RX, flow_group_id, 0, tir)
    end
    hca:set_flow_table_root(rxtable, NIC_RX)
+   --debug_trace = false
 
    function self:stop ()
       pci.set_bus_master(pciaddress, false)
@@ -1070,9 +1073,9 @@ function HCA:create_flow_group_macvlan (table_id, table_type, start_ix, end_ix)
       :input("table_id",       0x14,        23,  0, table_id)
       :input("start_ix",       0x1C,        31,  0, start_ix)
       :input("end_ix",         0x24,        31,  0, end_ix) -- (inclusive)
-      :input("match_criteria", 0x3C,         7,  0, 0) -- match outer headers
---      :input("dmac0",          0x40 + 0x08, 31,  0, 0xFFFFFFFF)
---      :input("dmac1",          0x40 + 0x0C, 31, 16, 0xFFFF)
+      :input("match_criteria", 0x3C,         7,  0, 1) -- match outer headers
+      :input("dmac0",          0x40 + 0x08, 31,  0, 0xFFFFFFFF)
+      :input("dmac1",          0x40 + 0x0C, 31, 16, 0xFFFF)
 --      :input("vlanid",         0x40 + 0x0C, 11,  0, 0xFFF)
       :execute()
    local group_id = self:output(0x08, 23, 0)
@@ -1090,8 +1093,8 @@ function HCA:set_flow_table_entry_macvlan (table_id, table_type, group_id, flow_
       :input("group_id",     0x40 + 0x04,  31,  0, group_id)
       :input("action",       0x40 + 0x0C,  15,  0, 4) -- action = FWD_DST
       :input("dest_list_sz", 0x40 + 0x10,  23,  0, 1) -- destination list size
---      :input("dmac0",        0x40 + 0x48,  31,  0, shr(dmac, 16))
---      :input("dmac1",        0x40 + 0x4C,  31, 16, band(dmac, 0xFF))
+      :input("dmac0",        0x40 + 0x48,  31,  0, shr(dmac, 16))
+      :input("dmac1",        0x40 + 0x4C,  31, 16, band(dmac, 0xFFFF))
 --      :input("vlan",         0x40 + 0x4C,  11,  0, vlanid)
       :input("dest_type",    0x40 + 0x300, 31, 24, 2)
       :input("dest_id",      0x40 + 0x300, 23,  0, tir)
