@@ -12,13 +12,20 @@ local pci = require("lib.hardware.pci")
 local ffi = require("ffi")
 local C = ffi.C
 local lib = require("core.lib")
+local connectx4 = require("apps.mellanox.connectx4")
 
 -- Load master configuration for <pciaddr> from <ports>
 function load_control (ports, pciaddr)
    local c = config.new()
    local driver = assert(pci.device_info(pciaddr).driver, "Unsupported device: "..pciaddr)
+   local queues = {}
+   for _,t in ipairs(ports) do
+      print("id: " .. t.port_id)
+      table.insert(queues, t.port_id)
+   end
    if driver == 'apps.mellanox.connectx4' then
-      -- XXX - Configure ConnectX4 controller app here
+      config.app(c, "iocontrol",
+                 connectx4.ConnectX4, {pciaddress = pciaddr, queues = queues})
    end
    return c
 end
@@ -142,7 +149,8 @@ function load_port (c, t, pciaddr, sockpath, nports)
    local NIC = name.."_NIC"
    local driver = assert(pci.device_info(pciaddr).driver, "Unsupported device: "..pciaddr)
    if driver == 'apps.mellanox.connectx4' then
-      -- XXX - Configure ConnectX4 queue app here
+      config.app(c, NIC,
+                 connectx4.IO, {pciaddress = pciaddr, queue = t.port_id})
    elseif (driver == 'apps.intel.intel_app' or
            driver == 'apps.solarflare.solarflare') then
       local vmdq = true

@@ -126,6 +126,8 @@ function ConnectX4:new (conf)
 
    for _, queuename in ipairs(conf.queues) do
       
+      print("Creating MLX queue " .. queuename)
+
       local send_cq = hca:create_cq(1,    uar, eq.eqn, true)
       local recv_cq = hca:create_cq(recvq_size, uar, eq.eqn, false)
 
@@ -150,7 +152,7 @@ function ConnectX4:new (conf)
       --
       -- Snabb processes will use this information to take ownership
       -- of the queue to send and receive packets.
-      local shmpath = "pci/"..pciaddress.."/"..queuename
+      local shmpath = "group/pci/"..pciaddress.."/"..queuename
       local u64 = function (x) return ffi.cast("uint64_t", x) end
       shm.create_frame(shmpath,
                        {online        = {counter, 1},
@@ -748,6 +750,8 @@ IO.__index = IO
 function IO:new (conf)
    local self = setmetatable({}, self)
 
+   print("Opening MLX queue " .. conf.queue)
+
    local pciaddress = pci.qualified(conf.pciaddress)
    local queue = conf.queue
    local mmio, fd = pci.map_pci_memory(pciaddress, 0, false)
@@ -757,7 +761,7 @@ function IO:new (conf)
    local sq                  -- SQ send queue object
    local rq                  -- RQ receive queue object
    local open_throttle =     -- Timer to throttle shm open attempts (10ms)
-      lib.throttle(0.01)
+      lib.throttle(0.25)
 
    -- Close the queue mapping.
    local function close ()
@@ -769,7 +773,8 @@ function IO:new (conf)
 
    -- Open the queue mapping.
    local function open ()
-      local shmpath = "pci/"..pciaddress.."/"..queue
+      print("opening "..pciaddress)
+      local shmpath = "group/pci/"..pciaddress.."/"..queue
       if shm.exists(shmpath.."/online.counter") then
          frame = shm.open_frame(shmpath)
          
@@ -809,15 +814,15 @@ function IO:new (conf)
    -- Send packets to the NIC
    function self:push ()
       if check_online() then
-         sq:transmit(self.input.input)
+         sq:transmit(self.input.input or self.input.rx)
          sq:reclaim()
       end
    end
 
    -- Receive packets from the NIC.
    function self:pull ()
-      if self.output.output and check_online() then
-         rq:receive(self.output.output)
+      if check_online() then
+         rq:receive(self.output.output or self.output.tx)
          rq:refill()
       end
    end
@@ -888,7 +893,9 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
       end
    end
 
+   local t = lib.throttle(1.0)
    function self:receive (l)
+      if t() then print("l", l) end
       while true do
          -- Find the next completion entry.
          local c = cqe[next_completion]
@@ -912,7 +919,10 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
          if opcode == 0 or opcode == 2 then
             -- Successful transmission.
             assert(packets[idx] ~= nil)
-            link.transmit(l, packets[idx])
+            local p = packets[idx]
+            p.length = p
+            print("Received packet, size " .. len)
+            link.transmit(l, p)
             packets[idx] = nil
          elseif opcode == 13 or opcode == 14 then
             local syndromes = {
@@ -971,6 +981,7 @@ function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
       local start_wqeid = next_wqeid
       while not link.empty(l) and packets[next_packet] == nil do
          local p = link.receive(l)
+         print("Transmitting a packet, size "..p.length)
          local wqe = swq[next_packet]
          packets[next_packet] = p
          -- Control segment
