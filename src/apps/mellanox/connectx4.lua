@@ -766,8 +766,6 @@ IO.__index = IO
 function IO:new (conf)
    local self = setmetatable({}, self)
 
-   print("Opening MLX queue " .. conf.queue)
-
    local pciaddress = pci.qualified(conf.pciaddress)
    local queue = conf.queue
    local mmio, fd = pci.map_pci_memory(pciaddress, 0, false)
@@ -902,6 +900,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
          rwqe.address_high = bswap(tonumber(shr(phy, 32)))
          rwqe.address_low  = bswap(tonumber(band(phy, 0xFFFFFFFF)))
          next_buffer = (next_buffer + 1) % 65536
+         notify = true
       end
       if notify then
          -- ring doorbell
