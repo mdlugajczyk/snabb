@@ -39,8 +39,8 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
       end
    end
    -- Instantiate app network
-   local nic0 = connectx4.ConnectX4:new({pciaddress=pci0, queues=queues})
-   local nic1 = connectx4.ConnectX4:new({pciaddress=pci1, queues=queues})
+   local nic0 = connectx4.ConnectX4:new({pciaddress=pci0, queues=queues, macvlan=true})
+   local nic1 = connectx4.ConnectX4:new({pciaddress=pci1, queues=queues, macvlan=true})
    local io0 = {}               -- io apps on nic0
    local io1 = {}               -- io apps on nic1
    print(("creating %d queues per device..."):format(#queues))
@@ -57,7 +57,7 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
    -- Create diverse packet payload templates
    print("creating payloads...")
    local payload = {}
-   local npayloads = 10
+   local npayloads = 1000
    for i = 1, npayloads do
       local p = packet.allocate()
       payload[i] = p
@@ -66,54 +66,73 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
 
       -- MAC destination
       local r = math.random()
-      if     r < 0.10 then          -- 10% of packets are broadcast
-         ffi.fill(p.data, 6, 0xFF)
-      elseif r < 0.20 then          -- 10% are unicast to random destinations
-         for i = 1, 5 do p.data[i] = math.random(256) - 1 end
-      else                          -- rest are unicast to known mac
+--      if     r < 0.10 then          -- 10% of packets are broadcast
+--         ffi.fill(p.data, 6, 0xFF)
+--      elseif r < 0.20 then          -- 10% are unicast to random destinations
+--         for i = 1, 5 do p.data[i] = math.random(256) - 1 end
+--      else                          -- rest are unicast to known mac
          p.data[5] = between(1, macs)
-      end
+--      end
 
       p.data[12] = 0x08 -- ipv4
-
+      
       -- MAC source
-      --for i = 7, 11 do p.data[i] = math.random(256) - 1 end
+      for i = 7, 11 do p.data[i] = math.random(256) - 1 end
       -- 802.1Q
-       --p.data[12] = 0x81
-      --p.data[15] = between(1, vlans+1) -- vlan id can be out of expected range
-      --p.data[16] = 0x08 -- ipv4
+      p.data[12] = 0x81
+      p.data[15] = between(1, vlans) -- vlan id can be out of expected range
+      p.data[16] = 0x08 -- ipv4
       -- Random payload
-      --[[
       for i = 50, p.length-1 do
          p.data[i] = math.random(256) - 1
       end
-      --]]
-      print(lib.hexdump(ffi.string(p.data, 32)))
+      --print(lib.hexdump(ffi.string(p.data, 32)))
    end
    -- Wait for linkup on both ports
    print("waiting for linkup...")
    while not (nic0.hca:linkup() and nic1.hca:linkup()) do C.usleep(0.25e6) end
    -- Send packets
    print("sending packets...")
-   while npackets > 0 do
+
+   local function dump (pci, id, app)
+      -- Dump received packets
+      while not link.empty(app.output.output) do
+         local p = link.receive(app.output.output)
+         --print(("recv %s %4d %s: %s"):format(pci, p.length, id, lib.hexdump(ffi.string(p.data, 32))))
+         packet.free(p)
+      end
+   end
+
+   local start = engine.now()
+   local remaining = npackets
+   require("lib.traceprof.traceprof").start()
+   while remaining > 0 do
       -- Send packets
       for id, _ in pairs(io0) do
          for i = 1, between(minburst, maxburst) do
-            if npackets > 0 then
-               local template = payload[between(1, npayloads)]
-               local p = packet.clone(template)
-               --print(p.length) print(lib.hexdump(ffi.string(p.data, 32)))
+            if remaining > 0 then
+               local p = payload[between(1, npayloads)]
+               --print(("send(%4d): %s"):format(p.length, lib.hexdump(ffi.string(p.data, 32))))
                link.transmit(io0[id].input.input, packet.clone(p))
                link.transmit(io1[id].input.input, packet.clone(p))
-               npackets = npackets - 1
+               remaining = remaining - 1
             end
          end
       end
-      C.usleep(1000)
       -- Simulate breathing
-      for _, app in pairs(io0) do app:pull() app:push() end
-      for _, app in pairs(io1) do app:pull() app:push() end
+      --C.usleep(100)
+      for id, app in pairs(io0) do app:pull() app:push() dump(pci0, id, app) end
+      for id, app in pairs(io1) do app:pull() app:push() dump(pci1, id, app) end
+      -- Simulate breathing
    end
+   require("lib.traceprof.traceprof").stop()
+   -- Receive any last packets
+   C.usleep(100)
+   for i = 1, 10 do
+      for id, app in pairs(io0) do app:pull() app:push() dump(pci0, id, app) end
+      for id, app in pairs(io1) do app:pull() app:push() dump(pci1, id, app) end
+   end
+   local finish = engine.now()
    print("reporting...")
    print(("%-16s  %20s  %20s"):format("hardware counter", pci0, pci1))
    print("----------------  --------------------  --------------------")
@@ -142,15 +161,20 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
       prlink(pci0, id, io0[id])
       prlink(pci1, id, io1[id])
    end
+   print(("time: %.1fs - Mpps: %.3f per NIC"):format(finish-start, npackets/1e6/(finish-start)))
    print("selftest: done")
 end
 
 -- Return a random number between min and max (inclusive.)
 function between (min, max)
-   return min + math.random(max-min) - 1
+   if min == max then
+      return min
+   else
+      return min + math.random(max-min+1) - 1
+   end
 end
 
 function selftest ()
-   switch("02:00.0", "82:00.0", 1e3, 1, 60, 1500, 5, 10, 2, 1, 1)
+   switch("02:00.0", "03:00.0", 10e6, 1, 60, 1500, 100, 100, 4, 4, 1)
 end
 
