@@ -43,6 +43,7 @@ local counter = require("core.counter")
 local bits, bitset = lib.bits, lib.bitset
 local floor = math.floor
 local cast = ffi.cast
+local ethernet = require("lib.protocol.ethernet")
 local band, bor, shl, shr, bswap, bnot =
    bit.band, bit.bor, bit.lshift, bit.rshift, bit.bswap, bit.bnot
 
@@ -70,6 +71,14 @@ function ConnectX4:new (conf)
 
    local sendq_size = conf.sendq_size or 1024
    local recvq_size = conf.recvq_size or 1024
+
+   -- XXX Config says whether to setup queues with MAC+VLAN
+   -- dispatching ("VMDq") or to simply hash uniformly over them ("RSS").
+   --
+   -- To be replaced with a more generic algorithm that looks at the
+   -- configurations of the individual ports and creates an
+   -- appropriate flow table.
+   local macvlan = conf.macvlan
 
    local mtu = conf.mtu or 9500
 
@@ -118,41 +127,36 @@ function ConnectX4:new (conf)
    local tdomain = hca:alloc_transport_domain()
    local rlkey = hca:query_rlkey()
 
-   -- Create send and receive queues & associated objects
-   --
-   local tis = hca:create_tis(0, tdomain)
    -- List of all receive queues for hashing traffic across
    local rqlist = {}
+   local rqs = {}
 
-   for _, queuename in ipairs(conf.queues) do
+   for _, queue in ipairs(conf.queues) do
       
-      print("Creating MLX queue " .. queuename)
-
       local send_cq = hca:create_cq(1,    uar, eq.eqn, true)
       local recv_cq = hca:create_cq(recvq_size, uar, eq.eqn, false)
 
       -- Allocate work queue memory (receive & send contiguous in memory)
       local wq_doorbell = memory.dma_alloc(16)
-      local sendq_size = 1024
-      local recvq_size = 1024
       local workqueues = memory.dma_alloc(64 * (sendq_size + recvq_size), 4096)
       local rwq = workqueues                   -- receive work queue
       local swq = workqueues + 64 * recvq_size -- send work queue
       
       -- Create the queue objects
+      local tis = hca:create_tis(0, tdomain)
       local sqn = hca:create_sq(send_cq, pd, sendq_size, wq_doorbell, swq, uar, tis)
       hca:modify_sq(sqn, 0, 1) -- RESET -> READY
       local rqn = hca:create_rq(recv_cq, pd, recvq_size, wq_doorbell, rwq)
       hca:modify_rq(rqn, 0, 1) -- RESET -> READY
-
-      table.insert(rqlist, rqn)
+      rqs[queue.id] = rqn
+      rqlist[#rqlist+1] = rqn
 
       -- Create shared memory objects containing all of the
       -- information needed to access the send and receive queues.
       --
       -- Snabb processes will use this information to take ownership
       -- of the queue to send and receive packets.
-      local shmpath = "group/pci/"..pciaddress.."/"..queuename
+      local shmpath = "group/pci/"..pciaddress.."/"..queue.id
       local u64 = function (x) return ffi.cast("uint64_t", x) end
       shm.create_frame(shmpath,
                        {online        = {counter, 1},
@@ -171,19 +175,26 @@ function ConnectX4:new (conf)
                         recv_doorbell = {counter, u64(wq_doorbell)},
                         recv_uar_page = {counter, uar},
                         rlkey         = {counter, rlkey}})
+      counter.commit()
    end
 
-   --local tir = hca:create_tir_direct(rqlist[1], tdomain)
-   local rqt = hca:create_rqt(rqlist)
-   local tir = hca:create_tir_indirect(rqt, tdomain)
-
-   -- Setup packet dispatching.
-   -- Just a "wildcard" flow group to send RX packets to the receive queue.
-   --
-   local rx_flow_table_id = hca:create_root_flow_table(NIC_RX)
-   local flow_group_id = hca:create_flow_group_wildcard(rx_flow_table_id, NIC_RX, 0, 0)
-   hca:set_flow_table_entry_wildcard(rx_flow_table_id, NIC_RX, flow_group_id, 0, tir)
-   hca:set_flow_table_root(rx_flow_table_id, NIC_RX)
+   local rxtable = hca:create_root_flow_table(NIC_RX)
+   local rule = 0
+   if macvlan then
+      local flow_group_id = hca:create_flow_group_macvlan(rxtable, NIC_RX, 0, #conf.queues-1)
+      for _, queue in ipairs(conf.queues) do
+         local tir = hca:create_tir_direct(rqs[queue.id], tdomain)
+         hca:set_flow_table_entry_macvlan(rxtable, NIC_RX, flow_group_id, rule, tir,
+                                          ethernet:ptoi(queue.mac), queue.vlan)
+         rule = rule + 1
+      end
+   else
+      local rqt = hca:create_rqt(rqlist)
+      local flow_group_id = hca:create_flow_group_wildcard(rxtable, NIC_RX, 0, 0)
+      local tir = hca:create_tir_indirect(rqt, tdomain)
+      hca:set_flow_table_entry_wildcard(rxtable, NIC_RX, flow_group_id, 0, tir)
+   end
+   hca:set_flow_table_root(rxtable, NIC_RX)
 
    function self:stop ()
       pci.set_bus_master(pciaddress, false)
@@ -507,6 +518,11 @@ function HCA:query_vport_state ()
       :execute()
    return { admin_state = self:output(0x0C, 7, 4),
             oper_state  = self:output(0x0C, 3, 0) }
+end
+
+-- Convenience function
+function HCA:linkup ()
+   return self:query_vport_state().oper_state == 1
 end
 
 function HCA:query_vport_counter ()
@@ -841,7 +857,7 @@ local wqe_t = ffi.typeof[[
     uint32_t u32[0];
     uint64_t u64[0];
   } *
-]]
+  ]]
 
 -- CQEs are similar to WQEs.
 local cqe_t = wqe_t
@@ -862,11 +878,11 @@ local rwqe_t = ffi.typeof[[
 ]]
 
 function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
-   local self = {}
+   local rq = {}
    -- Convert arguments to internal types
-   doorbell = ffi.cast(doorbell_t, doorbell)
-   rwq = ffi.cast(rwqe_t, rwq)
-   cqe = ffi.cast(cqe_t, cq)
+   local doorbell = ffi.cast(doorbell_t, doorbell)
+   local rwq = ffi.cast(rwqe_t, rwq)
+   local cqe = ffi.cast(cqe_t, cq)
    -- Additional state
    local packets = ffi.new("struct packet *[?]", wqsize)
    local next_buffer = 0        -- next position for a buffer in wqe
@@ -874,7 +890,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
    local mine = 0               -- cqe ownership bit meaning software-owned
 
    -- Refill with buffers
-   function self:refill ()
+   function rq:refill ()
       local notify = false      -- have to notify NIC with doorbell ring?
       while packets[next_buffer % wqsize] == nil do
          local p = packet.allocate()
@@ -893,9 +909,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
       end
    end
 
-   local t = lib.throttle(1.0)
-   function self:receive (l)
-      if t() then print("l", l) end
+   function rq:receive (l)
       while true do
          -- Find the next completion entry.
          local c = cqe[next_completion]
@@ -917,11 +931,10 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
          local wqe = shr(bswap(c.u32[0x3C/4]), 16)
          local idx = wqe % wqsize
          if opcode == 0 or opcode == 2 then
-            -- Successful transmission.
+            -- Successful receive
             assert(packets[idx] ~= nil)
             local p = packets[idx]
-            p.length = p
-            print("Received packet, size " .. len)
+            p.length = len
             link.transmit(l, p)
             packets[idx] = nil
          elseif opcode == 13 or opcode == 14 then
@@ -939,7 +952,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
             local syndrome = c.u8[0x37]
             print(("Got error. opcode=%d syndrome=0x%x message=%s"):format(
                   opcode, syndrome, syndromes[syndromes])) -- XXX
-            -- Error on transmission.
+            -- Error on receive
             assert(packets[idx] ~= nil)
             packet.free(packets[idx])
             packets[idx] = nil
@@ -949,11 +962,11 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
       end
    end
 
-   function self:ring_doorbell ()
+   function rq:ring_doorbell ()
       doorbell[0].receive = bswap(next_buffer)
    end
 
-   return self
+   return rq
 end
 
 ---------------------------------------------------------------
@@ -962,11 +975,11 @@ end
 SQ = {}
 
 function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
-   local self = {}
+   local sq = {}
    -- Cast pointers to expected types
-   mmio = ffi.cast("uint8_t*", mmio)
-   swq = ffi.cast(wqe_t, swq)
-   doorbell = ffi.cast(doorbell_t, doorbell)
+   local mmio = ffi.cast("uint8_t*", mmio)
+   local swq = ffi.cast(wqe_t, swq)
+   local doorbell = ffi.cast(doorbell_t, doorbell)
    -- Additional state
    local packets = ffi.new("struct packet *[?]", wqsize)
    local next_packet = 0
@@ -977,11 +990,10 @@ function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
    local cqe = ffi.cast(cqe_t, cq)
 
    -- Transmit packets from the link onto the send queue.
-   function self:transmit (l)
+   function sq:transmit (l)
       local start_wqeid = next_wqeid
       while not link.empty(l) and packets[next_packet] == nil do
          local p = link.receive(l)
-         print("Transmitting a packet, size "..p.length)
          local wqe = swq[next_packet]
          packets[next_packet] = p
          -- Control segment
@@ -1014,7 +1026,7 @@ function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
 
    local next_reclaim = 0
    -- Free packets when their transmission is complete.
-   function self:reclaim ()
+   function sq:reclaim ()
       local c = cqe[0]
       local opcode = cqe.u8[0x38]
       local wqeid = shr(bswap(cqe.u32[0x3C/4]), 16)
@@ -1028,7 +1040,7 @@ function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
       end
    end
 
-   return self
+   return sq
 end
 
 NIC_RX = 0 -- Flow table type code for incoming packets
@@ -1039,7 +1051,7 @@ function HCA:create_root_flow_table (table_type)
    self:command("CREATE_FLOW_TABLE", 0x3C, 0x0C)
       :input("opcode",     0x00,        31, 16, 0x930)
       :input("table_type", 0x10,        31, 24, table_type)
-      :input("log_size",   0x18 + 0x00,  7,  0, 4) -- XXX make parameter
+      :input("log_size",   0x18 + 0x00,  7,  0, 10) -- XXX make parameter
       :execute()
    local table_id = self:output(0x08, 23, 0)
    return table_id
@@ -1062,7 +1074,7 @@ function HCA:create_flow_group_wildcard (table_id, table_type, start_ix, end_ix)
       :input("table_id",       0x14, 23,  0, table_id)
       :input("start_ix",       0x1C, 31,  0, start_ix)
       :input("end_ix",         0x24, 31,  0, end_ix) -- (inclusive)
-      :input("match_criteria", 0x3C,  7,  0, 0) -- match outer headers
+      :input("match_criteria", 0x3C,  7,  0, 0)
       :execute()
    local group_id = self:output(0x08, 23, 0)
    return group_id
@@ -1079,6 +1091,42 @@ function HCA:set_flow_table_entry_wildcard (table_id, table_type, group_id, flow
       :input("group_id",     0x40 + 0x04,  31,  0, group_id)
       :input("action",       0x40 + 0x0C,  15,  0, 4) -- action = FWD_DST
       :input("dest_list_sz", 0x40 + 0x10,  23,  0, 1) -- destination list size
+      :input("dest_type",    0x40 + 0x300, 31, 24, 2)
+      :input("dest_id",      0x40 + 0x300, 23,  0, tir)
+      :execute()
+end
+
+-- Create a DMAC+VLAN flow group.
+function HCA:create_flow_group_macvlan (table_id, table_type, start_ix, end_ix)
+   self:command("CREATE_FLOW_GROUP", 0x3FC, 0x0C)
+      :input("opcode",         0x00,        31, 16, 0x933)
+      :input("table_type",     0x10,        31, 24, table_type)
+      :input("table_id",       0x14,        23,  0, table_id)
+      :input("start_ix",       0x1C,        31,  0, start_ix)
+      :input("end_ix",         0x24,        31,  0, end_ix) -- (inclusive)
+      :input("match_criteria", 0x3C,         7,  0, 1) -- match outer headers
+      :input("dmac0",          0x40 + 0x08, 31,  0, 0xFFFFFFFF)
+      :input("dmac1",          0x40 + 0x0C, 31, 16, 0xFFFF)
+      :input("vlanid",         0x40 + 0x0C, 11,  0, 0xFFF)
+      :execute()
+   local group_id = self:output(0x08, 23, 0)
+   return group_id
+end
+
+-- Set a DMAC+VLAN flow table rule.
+function HCA:set_flow_table_entry_macvlan (table_id, table_type, group_id, flow_index, tir, dmac, vlanid)
+   self:command("SET_FLOW_TABLE_ENTRY", 0x40 + 0x300, 0x0C)
+      :input("opcode",       0x00,         31, 16, 0x936)
+      :input("opmod",        0x04,         15,  0, 0) -- new entry
+      :input("table_type",   0x10,         31, 24, table_type)
+      :input("table_id",     0x14,         23,  0, table_id)
+      :input("flow_index",   0x20,         31,  0, flow_index)
+      :input("group_id",     0x40 + 0x04,  31,  0, group_id)
+      :input("action",       0x40 + 0x0C,  15,  0, 4) -- action = FWD_DST
+      :input("dest_list_sz", 0x40 + 0x10,  23,  0, 1) -- destination list size
+      :input("dmac0",        0x40 + 0x48,  31,  0, shr(dmac, 16))
+      :input("dmac1",        0x40 + 0x4C,  31, 16, band(dmac, 0xFFFF))
+      :input("vlan",         0x40 + 0x4C,  11,  0, vlanid)
       :input("dest_type",    0x40 + 0x300, 31, 24, 2)
       :input("dest_id",      0x40 + 0x300, 23,  0, tir)
       :execute()
@@ -1602,8 +1650,8 @@ function selftest ()
    io1.output = { output = link.new('output1') }
    -- Exercise the IO apps before the NIC is initialized.
    io0:pull() io0:push() io1:pull() io1:push()
-   local nic0 = ConnectX4:new{pciaddress = pcidev0, queues = {'a'}}
-   local nic1 = ConnectX4:new{pciaddress = pcidev1, queues = {'b'}}
+   local nic0 = ConnectX4:new{pciaddress = pcidev0, queues = {{id='a'}}}
+   local nic1 = ConnectX4:new{pciaddress = pcidev1, queues = {{id='b'}}}
 
    print("selftest: waiting for both links up")
    while (nic0.hca:query_vport_state().oper_state ~= 1) or
@@ -1611,16 +1659,18 @@ function selftest ()
       C.usleep(1e6)
    end
 
-   local bursts = 10000
-   local each   = 1000
+   local bursts = 1000
+   local each   = 100
    local octets = 100
    print(("Links up. Sending %s packets."):format(lib.comma_value(each*bursts)))
 
    for i = 1, bursts do
-      for _, app in ipairs({io0, io1}) do
+      for id, app in ipairs({io0, io1}) do
          for i = 1, each do
             local p = packet.allocate()
             ffi.fill(p.data, octets, 0)  -- zero packet
+            local header = lib.hexundump("000000000001 000000000002 0800", 16)
+            ffi.copy(p.data, header, #header)
             p.data[12] = 0x08 -- ethertype = 0x0800
             p.length = octets
             link.transmit(app.input.input, p)
@@ -1629,6 +1679,15 @@ function selftest ()
          app:push()
       end
    end
+   print("link", "txpkt", "txbyte", "txdrop")
+   local i0 = io0.input.input
+   local i1 = io1.input.input
+   local o0 = io0.output.output
+   local o1 = io1.output.output
+   print("send0", tonumber(counter.read(i0.stats.txpackets)), tonumber(counter.read(i0.stats.txbytes)), tonumber(counter.read(i0.stats.txdrop)))
+   print("send1", tonumber(counter.read(i1.stats.txpackets)), tonumber(counter.read(i1.stats.txbytes)), tonumber(counter.read(i1.stats.txdrop)))
+   print("recv0", tonumber(counter.read(o0.stats.txpackets)), tonumber(counter.read(o0.stats.txbytes)), tonumber(counter.read(o0.stats.txdrop)))
+   print("recv1", tonumber(counter.read(o1.stats.txpackets)), tonumber(counter.read(o1.stats.txbytes)), tonumber(counter.read(o1.stats.txdrop)))
 
    print()
    print(("%-16s  %20s  %20s"):format("hardware counter", pcidev0, pcidev1))
