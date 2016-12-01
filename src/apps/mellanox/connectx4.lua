@@ -910,7 +910,8 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
    end
 
    function rq:receive (l)
-      while true do
+      local limit = engine.pull_npackets
+      while limit > 0 and not link.full(l) do
          -- Find the next completion entry.
          local c = cqe[next_completion]
          local owner = bit.band(1, c.u8[0x3F])
@@ -918,6 +919,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
             -- Completion entry is not available yet.
             break
          end
+         limit = limit - 1
          -- Advance to next completion.
          -- Note: assumes sqsize == cqsize
          next_completion = (next_completion + 1) % wqsize
