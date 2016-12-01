@@ -66,13 +66,13 @@ function switch (pci0, pci1, npackets, ncores, minlen, maxlen, minburst, maxburs
 
       -- MAC destination
       local r = math.random()
---      if     r < 0.10 then          -- 10% of packets are broadcast
---         ffi.fill(p.data, 6, 0xFF)
---      elseif r < 0.20 then          -- 10% are unicast to random destinations
---         for i = 1, 5 do p.data[i] = math.random(256) - 1 end
---      else                          -- rest are unicast to known mac
+      if     r < 0.10 then          -- 10% of packets are broadcast
+         ffi.fill(p.data, 6, 0xFF)
+      elseif r < 0.20 then          -- 10% are unicast to random destinations
+         for i = 1, 5 do p.data[i] = math.random(256) - 1 end
+      else                          -- rest are unicast to known mac
          p.data[5] = between(1, macs)
---      end
+      end
 
       p.data[12] = 0x08 -- ipv4
       
