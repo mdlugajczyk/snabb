@@ -117,6 +117,7 @@ function ConnectX4:new (conf)
 
    if debug_trace then self:check_vport() end
 
+   hca:set_port_mtu(mtu)
    hca:modify_nic_vport_context(mtu, true, true, true)
 
    -- Create basic objects that we need
@@ -1140,6 +1141,7 @@ end
 
 PAOS = 0x5006 -- Port Administrative & Operational Status
 PPLR = 0x5018 -- Port Physical Loopback Register)
+PMTU = 0x5003
 
 -- Set the administrative status of the port (boolean up/down).
 function HCA:set_admin_status (admin_up)
@@ -1150,6 +1152,16 @@ function HCA:set_admin_status (admin_up)
       :input("local_port",   0x10, 23, 16, 1) -- 
       :input("admin_status", 0x10, 11,  8, admin_up and 1 or 2)
       :input("ase",          0x14, 31, 31, 1) -- enable admin state update
+      :execute()
+end
+
+function HCA:set_port_mtu (mtu)
+   self:command("ACCESS_REGISTER", 0x1C, 0x0C)
+      :input("opcode", 0x00, 31, 16, 0x805)
+      :input("opmod", 0x04, 15, 0, 0) -- write
+      :input("register_id", 0x08, 15, 0, PMTU)
+      :input("local_port",   0x10, 23, 16, 1)
+      :input("admin_mtu", 0x18, 31, 16, mtu)
       :execute()
 end
 
