@@ -21,11 +21,11 @@ function load_control (ports, pciaddr)
    local queues = {}
    for _,t in ipairs(ports) do
       print("id: " .. t.port_id)
-      table.insert(queues, t.port_id)
+      table.insert(queues, {id = t.port_id, mac = t.mac_address, vlan = t.vlan})
    end
    if driver == 'apps.mellanox.connectx4' then
       config.app(c, "iocontrol",
-                 connectx4.ConnectX4, {pciaddress = pciaddr, queues = queues})
+                 connectx4.ConnectX4, {pciaddress = pciaddr, queues = queues, macvlan = true})
    end
    return c
 end
