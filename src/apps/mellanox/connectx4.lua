@@ -44,8 +44,10 @@ local bits, bitset = lib.bits, lib.bitset
 local floor = math.floor
 local cast = ffi.cast
 local ethernet = require("lib.protocol.ethernet")
+
 local band, bor, shl, shr, bswap, bnot =
    bit.band, bit.bor, bit.lshift, bit.rshift, bit.bswap, bit.bnot
+local cast, typeof = ffi.cast, ffi.typeof
 
 local debug_trace   = false     -- Print trace messages
 local debug_hexdump = false     -- Print hexdumps (in Linux mlx5 format)
@@ -54,6 +56,81 @@ local debug_hexdump = false     -- Print hexdumps (in Linux mlx5 format)
 -- XXX This is hard-coded in the Linux mlx5 driver too. Could
 -- alternatively detect from query_hca_cap.
 local rqt_max_size = 128
+
+---------------------------------------------------------------
+-- Shared memory structure representing a send/receive queue pair.
+--
+-- This is created by the app controlling the NIC and then
+-- attached/detached by IO apps that can run in different processes.
+---------------------------------------------------------------
+
+local cxq_t = ffi.typeof([[
+  struct {
+    uint32_t state;    // current state / availability
+
+    // configuration information:
+    uint32_t sqn;      // send queue number
+    uint32_t sqsize;   // send queue size
+    uint32_t uar;      // user access region
+    uint32_t rlkey;    // rlkey for value
+    uint32_t rqn;      // receive queue number
+    uint32_t rqsize;   // receive queue size
+
+    // DMA structures:
+    // doorbell contains send/receive ring cursor positions
+    struct { uint32_t receive, send; } *doorbell;
+
+    // receive work queue
+    struct { uint32_t length, lkey, dma_hi, dma_lo; } *rwq;
+
+    // send work queue and send/receive completion queues
+    union { uint8_t u8[64]; uint32_t u32[0]; uint64_t u64[0];} *swq, *scq, *rcq;
+  }
+]])
+
+-- State enum.
+local state = { OCCUPIED = 0, AVAILABLE = 1, DEAD = 2 }
+
+-- Create a new struct in shared memory.
+-- (Transition to DETACHED when ready for use.)
+function create_cxq (path)
+   return shm.create(path, cxq_t)
+end
+
+-- Attach to a queue.
+-- Returns true if the attach was successful.
+function attach_cxq (cx)
+   return transition(cx.state, state.AVAILABLE, state.OCCUPIED)
+end
+
+-- Detach from a queue.
+-- Precondition: Called by object that is currently attached.
+function detach_cxq (cx)
+   assert(transition(cx.state, state.OCCUPIED, state.AVAILABLE))
+end
+
+-- Close a queue.
+function close_cxq (cx)
+   local oldstate
+   repeat
+      oldstate = cx.state
+      assert(oldstate == state.AVAILABLE or oldstate == state.OCCUPIED, "illegal state")
+   until transition(cx.state, oldstate, state.CLOSED)
+   -- If this queue was occupied then the IO app is responsible for shutdown.
+   -- However, if this queue was available then it is our responsibility.
+   if oldstate == state.AVAILABLE then
+      -- Free receive buffers
+      -- Free transmit buffers
+   end
+end
+
+-- Make an atomic transition from oldstate to newstate.
+-- Returns true on success otherwise false (if oldstate did not match.)
+function transition_cxq (cx, oldstate, newstate)
+   -- XXX use atomic x86 "LOCK CMPXCHG" instruction
+   cx.state = newstate
+   return true
+end
 
 ---------------------------------------------------------------
 -- ConnectX4 Snabb app.
@@ -133,50 +210,32 @@ function ConnectX4:new (conf)
    local rqs = {}
 
    for _, queue in ipairs(conf.queues) do
-      
-      local send_cq = hca:create_cq(1,    uar, eq.eqn, true)
-      local recv_cq = hca:create_cq(recvq_size, uar, eq.eqn, false)
+      -- Create a shared memory object for controlling the queue pair
+      local cxq = create_cxq("group/pci/"..pciaddress.."/"..queue.id)
 
-      -- Allocate work queue memory (receive & send contiguous in memory)
-      local wq_doorbell = memory.dma_alloc(16)
+      cxq.rlkey = rlkey
+      cxq.sqsize = sendq_size
+      cxq.rqsize = recvq_size
+      cxq.uar = uar
+      local scqn, scqe = hca:create_cq(1, uar, eq.eqn, true)
+      local rcqn, rcqe = hca:create_cq(recvq_size, uar, eq.eqn, false)
+      cxq.scq = cast(typeof(cxq.scq), scqe)
+      cxq.rcq = cast(typeof(cxq.rcq), rcqe)
+      cxq.doorbell = cast(typeof(cxq.doorbell), memory.dma_alloc(16))
       local workqueues = memory.dma_alloc(64 * (sendq_size + recvq_size), 4096)
-      local rwq = workqueues                   -- receive work queue
-      local swq = workqueues + 64 * recvq_size -- send work queue
-      
+      cxq.rwq = cast(ffi.typeof(cxq.rwq), workqueues)
+      cxq.swq = cast(ffi.typeof(cxq.swq), workqueues + 64 * recvq_size)
       -- Create the queue objects
       local tis = hca:create_tis(0, tdomain)
-      local sqn = hca:create_sq(send_cq, pd, sendq_size, wq_doorbell, swq, uar, tis)
-      hca:modify_sq(sqn, 0, 1) -- RESET -> READY
-      local rqn = hca:create_rq(recv_cq, pd, recvq_size, wq_doorbell, rwq)
-      hca:modify_rq(rqn, 0, 1) -- RESET -> READY
-      rqs[queue.id] = rqn
-      rqlist[#rqlist+1] = rqn
+      -- XXX order check
+      cxq.sqn = hca:create_sq(scqn, pd, sendq_size, cxq.doorbell, cxq.swq, uar, tis)
+      cxq.rqn = hca:create_rq(rcqn, pd, recvq_size, cxq.doorbell, cxq.rwq)
+      hca:modify_sq(cxq.sqn, 0, 1) -- RESET -> READY
+      hca:modify_rq(cxq.rqn, 0, 1) -- RESET -> READY
 
-      -- Create shared memory objects containing all of the
-      -- information needed to access the send and receive queues.
-      --
-      -- Snabb processes will use this information to take ownership
-      -- of the queue to send and receive packets.
-      local shmpath = "group/pci/"..pciaddress.."/"..queue.id
-      local u64 = function (x) return ffi.cast("uint64_t", x) end
-      shm.create_frame(shmpath,
-                       {online        = {counter, 1},
-                        send_sqn      = {counter, sqn},
-                        send_wq       = {counter, u64(swq)},
-                        send_wqsize   = {counter, sendq_size},
-                        send_cqn      = {counter, send_cq.cqn},
-                        send_cqe      = {counter, u64(send_cq.cqe)},
-                        send_doorbell = {counter, u64(wq_doorbell)},
-                        send_uar_page = {counter, uar},
-                        recv_rqn      = {counter, rqn},
-                        recv_wq       = {counter, u64(rwq)},
-                        recv_wqsize   = {counter, recvq_size},
-                        recv_cqn      = {counter, recv_cq.cqn},
-                        recv_cqe      = {counter, u64(recv_cq.cqe)},
-                        recv_doorbell = {counter, u64(wq_doorbell)},
-                        recv_uar_page = {counter, uar},
-                        rlkey         = {counter, rlkey}})
-      counter.commit()
+      -- XXX collect for flow table construction
+      rqs[queue.id] = cxq.rqn
+      rqlist[#rqlist+1] = cxq.rqn
    end
 
    local rxtable = hca:create_root_flow_table(NIC_RX)
@@ -457,7 +516,7 @@ function HCA:create_eq (uar)
 end
 
 -- Event Queue Entry (EQE)
-local eqe_t = ffi.typeof[[
+local eqe_t = ffi.typeof([[
   struct {
     uint16_t event_type;
     uint16_t event_sub_type;
@@ -465,8 +524,7 @@ local eqe_t = ffi.typeof[[
     uint16_t pad;
     uint8_t signature;
     uint8_t owner;
-  }
- ]]
+  } ]])
 
 eq = {}
 eq.__index = eq
@@ -680,12 +738,12 @@ function HCA:create_cq (entries, uar_page, eqn, collapsed)
       :input("pas[0] low",    0x114,       31,  0, ptrbits(cqe_phy, 31, 0))
       :execute()
    local cqn = self:output(0x08, 23, 0)
-   return { cqn = cqn, doorbell = doorbell, cqe = cqe }
+   return cqn, cqe
 end
 
 -- Create a receive queue and return a receive queue object.
 -- Return the receive queue number and a pointer to the WQEs.
-function HCA:create_rq (cq, pd, size, doorbell, rwq)
+function HCA:create_rq (cqn, pd, size, doorbell, rwq)
    local log_wq_size = log2size(size)
    local db_phy = memory.virtual_to_physical(doorbell)
    local rwq_phy = memory.virtual_to_physical(rwq)
@@ -693,7 +751,7 @@ function HCA:create_rq (cq, pd, size, doorbell, rwq)
       :input("opcode",        0x00, 31, 16, 0x908)
       :input("rlkey",         0x20 + 0x00, 31, 31, 1)
       :input("vlan_strip_disable", 0x20 + 0x00, 28, 28, 1)
-      :input("cqn",           0x20 + 0x08, 23, 0, cq.cqn)
+      :input("cqn",           0x20 + 0x08, 23, 0, cqn)
       :input("wq_type",       0x20 + 0x30 + 0x00, 31, 28, 1) -- cyclic
       :input("pd",            0x20 + 0x30 + 0x08, 23,  0, pd)
       :input("dbr_addr high", 0x20 + 0x30 + 0x10, 31,  0, ptrbits(db_phy, 63, 32))
@@ -729,7 +787,7 @@ end
 
 -- Create a Send Queue.
 -- Return the send queue number and a pointer to the WQEs.
-function HCA:create_sq (cq, pd, size, doorbell, swq, uar, tis)
+function HCA:create_sq (cqn, pd, size, doorbell, swq, uar, tis)
    local log_wq_size = log2size(size)
    local db_phy = memory.virtual_to_physical(doorbell)
    local swq_phy = memory.virtual_to_physical(swq)
@@ -739,7 +797,7 @@ function HCA:create_sq (cq, pd, size, doorbell, swq, uar, tis)
       :input("fre",            0x20 + 0x00,        29, 29, 1)
       :input("flush_in_error_en",   0x20 + 0x00,   28, 28, 1)
       :input("min_wqe_inline_mode", 0x20 + 0x00,   26, 24, 1)
-      :input("cqn",            0x20 + 0x08,        23, 0, cq.cqn)
+      :input("cqn",            0x20 + 0x08,        23, 0, cqn)
       :input("tis_lst_sz",     0x20 + 0x20,        31, 16, 1)
       :input("tis",            0x20 + 0x2C,        23, 0, tis)
       :input("wq_type",        0x20 + 0x30 + 0x00, 31, 28, 1) -- cyclic
@@ -772,7 +830,7 @@ function IO:new (conf)
    local mmio, fd = pci.map_pci_memory(pciaddress, 0, false)
 
    local online = false      -- True when queue is up and running
-   local frame               -- shm frame containing queue control information
+   local cxq                 -- shm object containing queue control information
    local sq                  -- SQ send queue object
    local rq                  -- RQ receive queue object
    local open_throttle =     -- Timer to throttle shm open attempts (10ms)
@@ -780,36 +838,19 @@ function IO:new (conf)
 
    -- Close the queue mapping.
    local function close ()
-      counter.delete_frame(send)
-      counter.delete_frame(recv)
-      send, recv = nil, nil
+      print("CLOSE")
+      shm.unmap(cxq)
       online = false
    end
 
    -- Open the queue mapping.
    local function open ()
-      print("opening "..pciaddress)
+      print("opening "..pciaddress.." queue "..queue)
       local shmpath = "group/pci/"..pciaddress.."/"..queue
-      if shm.exists(shmpath.."/online.counter") then
-         frame = shm.open_frame(shmpath)
-         
-         local function c (ctr) return counter.read(ctr) end -- read counter (u64)
-         local function n (ctr) return tonumber(c(ctr)) end  -- ... as Lua num
-
-         sq = SQ:new(n(frame.send_sqn),
-                     c(frame.send_wq),
-                     n(frame.send_wqsize),
-                     c(frame.send_doorbell),
-                     mmio,
-                     n(frame.send_uar_page),
-                     n(frame.rlkey),
-                     c(frame.send_cqe))
-         rq = RQ:new(n(frame.recv_rqn),
-                     c(frame.recv_wq),
-                     n(frame.recv_wqsize),
-                     c(frame.recv_doorbell),
-                     n(frame.rlkey),
-                     c(frame.recv_cqe))
+      if shm.exists(shmpath) then
+         cxq = shm.open(shmpath, cxq_t)
+         sq = SQ:new(cxq, mmio)
+         rq = RQ:new(cxq)
          online = true
       end
    end
@@ -817,9 +858,6 @@ function IO:new (conf)
    -- Check for online/offline queue state change.
    -- Return true if the queue is online.
    local function check_online ()
-      if online and counter.read(frame.online) == 0 then
-         close()
-      end
       if not online and open_throttle() then
          open()
       end
@@ -876,14 +914,10 @@ local rwqe_t = ffi.typeof[[
   } *
 ]]
 
-function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
+function RQ:new (cxq)
    local rq = {}
-   -- Convert arguments to internal types
-   local doorbell = ffi.cast(doorbell_t, doorbell)
-   local rwq = ffi.cast(rwqe_t, rwq)
-   local cqe = ffi.cast(cqe_t, cq)
    -- Additional state
-   local packets = ffi.new("struct packet *[?]", wqsize)
+   local packets = ffi.new("struct packet *[?]", cxq.rqsize)
    local next_buffer = 0        -- next position for a buffer in wqe
    local next_completion = 0    -- next completion queue position to process
    local mine = 0               -- cqe ownership bit meaning software-owned
@@ -891,21 +925,21 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
    -- Refill with buffers
    function rq:refill ()
       local notify = false      -- have to notify NIC with doorbell ring?
-      while packets[next_buffer % wqsize] == nil do
+      while packets[next_buffer % cxq.rqsize] == nil do
          local p = packet.allocate()
-         packets[next_buffer % wqsize] = p
-         local rwqe = rwq[next_buffer % wqsize]
+         packets[next_buffer % cxq.rqsize] = p
+         local rwqe = cxq.rwq[next_buffer % cxq.rqsize]
          local phy = memory.virtual_to_physical(p.data)
          rwqe.length = bswap(packet.max_payload)
-         rwqe.lkey = bswap(rlkey)
-         rwqe.address_high = bswap(tonumber(shr(phy, 32)))
-         rwqe.address_low  = bswap(tonumber(band(phy, 0xFFFFFFFF)))
+         rwqe.lkey = bswap(cxq.rlkey)
+         rwqe.dma_hi = bswap(tonumber(shr(phy, 32)))
+         rwqe.dma_lo  = bswap(tonumber(band(phy, 0xFFFFFFFF)))
          next_buffer = (next_buffer + 1) % 65536
          notify = true
       end
       if notify then
          -- ring doorbell
-         doorbell[0].receive = bswap(next_buffer)
+         cxq.doorbell[0].receive = bswap(next_buffer)
       end
    end
 
@@ -913,7 +947,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
       local limit = engine.pull_npackets
       while limit > 0 and not link.full(l) do
          -- Find the next completion entry.
-         local c = cqe[next_completion]
+         local c = cxq.rcq[next_completion]
          local owner = bit.band(1, c.u8[0x3F])
          if owner ~= mine then
             -- Completion entry is not available yet.
@@ -922,7 +956,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
          limit = limit - 1
          -- Advance to next completion.
          -- Note: assumes sqsize == cqsize
-         next_completion = (next_completion + 1) % wqsize
+         next_completion = (next_completion + 1) % cxq.rqsize
          -- Toggle the ownership value if the CQ wraps around.
          if next_completion == 0 then
             mine = (mine + 1) % 2
@@ -931,7 +965,7 @@ function RQ:new (rqn, rwq, wqsize, doorbell, rlkey, cq)
          local opcode = shr(c.u8[0x3F], 4)
          local len = bswap(c.u32[0x2C/4])
          local wqe = shr(bswap(c.u32[0x3C/4]), 16)
-         local idx = wqe % wqsize
+         local idx = wqe % cxq.rqsize
          if opcode == 0 or opcode == 2 then
             -- Successful receive
             assert(packets[idx] ~= nil)
@@ -976,31 +1010,28 @@ end
 
 SQ = {}
 
-function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
+function SQ:new (cxq, mmio)
    local sq = {}
    -- Cast pointers to expected types
    local mmio = ffi.cast("uint8_t*", mmio)
-   local swq = ffi.cast(wqe_t, swq)
-   local doorbell = ffi.cast(doorbell_t, doorbell)
    -- Additional state
-   local packets = ffi.new("struct packet *[?]", wqsize)
+   local packets = ffi.new("struct packet *[?]", cxq.sqsize)
    local next_packet = 0
    local next_wqeid  = 0
    -- Locate "blue flame" register areas for the UAR page
-   local bf_next = ffi.cast("uint64_t*", mmio + (uar * 4096) + 0x800)
-   local bf_alt  = ffi.cast("uint64_t*", mmio + (uar * 4096) + 0x900)
-   local cqe = ffi.cast(cqe_t, cq)
+   local bf_next = ffi.cast("uint64_t*", mmio + (cxq.uar * 4096) + 0x800)
+   local bf_alt  = ffi.cast("uint64_t*", mmio + (cxq.uar * 4096) + 0x900)
 
    -- Transmit packets from the link onto the send queue.
    function sq:transmit (l)
       local start_wqeid = next_wqeid
       while not link.empty(l) and packets[next_packet] == nil do
          local p = link.receive(l)
-         local wqe = swq[next_packet]
+         local wqe = cxq.swq[next_packet]
          packets[next_packet] = p
          -- Control segment
          wqe.u32[0] = bswap(shl(next_wqeid, 8) + 0x0A)
-         wqe.u32[1] = bswap(shl(sqn, 8) + 4)
+         wqe.u32[1] = bswap(shl(cxq.sqn, 8) + 4)
          wqe.u32[2] = bswap(shl(2, 2)) -- completion always
          -- Ethernet segment
          local ninline = 16
@@ -1008,19 +1039,19 @@ function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
          ffi.copy(wqe.u8 + 0x1E, p.data, ninline)
          -- Send Data Segment (inline data)
          wqe.u32[12] = bswap(p.length - ninline)
-         wqe.u32[13] = bswap(rlkey)
+         wqe.u32[13] = bswap(cxq.rlkey)
          local phy = memory.virtual_to_physical(p.data + ninline)
          wqe.u32[14] = bswap(tonumber(phy) / 2^32)
          wqe.u32[15] = bswap(tonumber(phy) % 2^32)
          -- Advance counters
          next_wqeid = (next_wqeid + 1) % 65536
-         next_packet = next_wqeid % wqsize
+         next_packet = next_wqeid % cxq.sqsize
       end
       -- Ring the doorbell if we enqueued new packets.
       if next_wqeid ~= start_wqeid then
-         local current_packet = (next_packet + wqsize-1) % wqsize
-         doorbell.send = bswap(next_wqeid)
-         bf_next[0] = swq[current_packet].u64[0]
+         local current_packet = (next_packet + cxq.sqsize-1) % cxq.sqsize
+         cxq.doorbell.send = bswap(next_wqeid)
+         bf_next[0] = cxq.swq[current_packet].u64[0]
          -- Switch next/alternate blue flame register for next time
          bf_next, bf_alt = bf_alt, bf_next
       end
@@ -1029,15 +1060,15 @@ function SQ:new (sqn, swq, wqsize, doorbell, mmio, uar, rlkey, cq)
    local next_reclaim = 0
    -- Free packets when their transmission is complete.
    function sq:reclaim ()
-      local c = cqe[0]
-      local opcode = cqe.u8[0x38]
-      local wqeid = shr(bswap(cqe.u32[0x3C/4]), 16)
+      local c = cxq.scq[0]
+      local opcode = c.u8[0x38]
+      local wqeid = shr(bswap(c.u32[0x3C/4]), 16)
       if opcode == 0x0A then
-         while next_reclaim ~= wqeid % wqsize do
+         while next_reclaim ~= wqeid % cxq.sqsize do
             assert(packets[next_reclaim] ~= nil)
             packet.free(packets[next_reclaim])
             packets[next_reclaim] = nil
-            next_reclaim = (next_reclaim + 1) % wqsize
+            next_reclaim = (next_reclaim + 1) % cxq.sqsize
          end
       end
    end
