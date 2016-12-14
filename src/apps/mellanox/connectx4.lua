@@ -58,12 +58,66 @@ local debug_hexdump = false     -- Print hexdumps (in Linux mlx5 format)
 local rqt_max_size = 128
 
 ---------------------------------------------------------------
--- Shared memory structure representing a send/receive queue pair.
---
--- This is created by the app controlling the NIC and then
--- attached/detached by IO apps that can run in different processes.
+-- CXQ (ConnectX Queue pair) control object:
+-- 
+-- A "CXQ" is an object that we define to represent a transmit/receive pair.
+-- 
+-- CXQs are created and deleted by a "Control" app and, in between,
+-- they are used by "IO" apps to send and receive packets.
+-- 
+-- The lifecycle of a CXQ is managed using a state machine. This is
+-- necessary because we allow Control and IO apps to start in any
+-- order, for Control and IO apps to start/stop/restart independently,
+-- for multiple IO apps to attempt to attach to the same CXQ, and even
+-- for apps to stop in one Snabb process and be started in another
+-- one.
+-- 
+-- (This design may turn out to be overkill if we discover in the
+-- future that we do not need this much flexibility. Time will tell.)
 ---------------------------------------------------------------
 
+-- CXQs can be in one of four states:
+--   FREE: CXQ is ready and available for use by an IO app.
+--   IDLE: CXQ is owned by an app, but not actively processing right now.
+--   BUSY: CXQ is owned by an app and is currently processing (e.g. push/pull).
+--   DEAD: CXQ has been deallocated; IO app must try to open a new one.
+-- 
+-- Once a CXQ is closed it stays in the DEAD state forever. However, a
+-- replacement CXQ with the same name can be created and existing IO
+-- apps can reattach to that instead. This will rerun the state machine.
+--
+-- Here are the valid state transitions & when they occur:
+--
+-- App  Change      Why
+-- ---- ----------- --------------------------------------------------------
+-- CTRL none->BUSY: Control app starts initialization.
+-- CTRL BUSY->FREE: Control app completes initialization.
+-- IO   FREE->IDLE: IO app starts and becomes owner of the CXQ.
+-- IO   IDLE->FREE: IO app stops and releases the CXQ for future use.
+-- IO   IDLE->BUSY: IO app starts running a pull/push method.
+-- IO   BUSY->IDLE: IO app stops running a pull/push method.
+-- CTRL IDLE->DEAD: Control app closes the CXQ. (Replacement can be created.)
+-- 
+-- These state transitions are *PROHIBITED* for important reasons:
+--
+-- App    Change      Why *PROHIBITED*
+-- ------ ----------- --------------------------------------------------------
+-- CTRL   BUSY->DEAD  Cannot close a CXQ while it is busy (must wait.)
+-- IO     DEAD->BUSY  Cannot use a CXQ that is closed (must check.)
+-- *      DEAD->*     Cannot transition from DEAD (must create new CXQ.)
+--
+-- Further notes:
+-- 
+--   Packet buffers for pending DMA (transmit or receive) are freed by
+--   the Control app (which can disable DMA first) rather than by the IO
+--   app (which shuts down with DMA still active.)
+
+-- A CXQ is represented by one struct allocated in shared memory.
+-- 
+-- The struct defines the fields in very specific terms so that it can
+-- be used directly by the driver code (rather than copying back and
+-- forth between the shared memory object and a separate native
+-- format.)
 local cxq_t = ffi.typeof([[
   struct {
     uint32_t state;    // current state / availability
@@ -85,50 +139,31 @@ local cxq_t = ffi.typeof([[
 
     // send work queue and send/receive completion queues
     union { uint8_t u8[64]; uint32_t u32[0]; uint64_t u64[0];} *swq, *scq, *rcq;
+
+    // Transmit state
+    struct packet *tx[64*1024]; // packets queued for transmit
+    uint16_t next_tx_wqeid;           // work queue ID for next transmit descriptor
+    uint64_t *bf_next, *bf_alt; // "blue flame" to ring doorbell (alternating)
+
+    // Receive state
+    struct packet *rx[64*1024]; // packets queued for receive
+    uint16_t next_rx_wqeid;           // work queue ID for next receive descriptor
+    uint16_t next_rx_cqeid;          // completion queue ID of next completed packet
+    int rx_mine;                // CQE ownership value that means software-owned
   }
 ]])
 
--- State enum.
-local state = { OCCUPIED = 0, AVAILABLE = 1, DEAD = 2 }
+-- CXQ states:
+local BUSY = 0 -- Implicit initial state due to 0 value.
+local IDLE = 1
+local FREE = 2
+local DEAD = 3
 
--- Create a new struct in shared memory.
--- (Transition to DETACHED when ready for use.)
-function create_cxq (path)
-   return shm.create(path, cxq_t)
-end
-
--- Attach to a queue.
--- Returns true if the attach was successful.
-function attach_cxq (cx)
-   return transition(cx.state, state.AVAILABLE, state.OCCUPIED)
-end
-
--- Detach from a queue.
--- Precondition: Called by object that is currently attached.
-function detach_cxq (cx)
-   assert(transition(cx.state, state.OCCUPIED, state.AVAILABLE))
-end
-
--- Close a queue.
-function close_cxq (cx)
-   local oldstate
-   repeat
-      oldstate = cx.state
-      assert(oldstate == state.AVAILABLE or oldstate == state.OCCUPIED, "illegal state")
-   until transition(cx.state, oldstate, state.CLOSED)
-   -- If this queue was occupied then the IO app is responsible for shutdown.
-   -- However, if this queue was available then it is our responsibility.
-   if oldstate == state.AVAILABLE then
-      -- Free receive buffers
-      -- Free transmit buffers
-   end
-end
-
--- Make an atomic transition from oldstate to newstate.
--- Returns true on success otherwise false (if oldstate did not match.)
-function transition_cxq (cx, oldstate, newstate)
-   -- XXX use atomic x86 "LOCK CMPXCHG" instruction
-   cx.state = newstate
+-- Transition from oldstate to newstate.
+-- Returns true on successful transition, false if oldstate does not match.
+function transition (cxq, oldstate, newstate)
+   -- XXX use atomic x86 "LOCK CMPXCHG" instruction. Have to teach DynASM.
+   cxq.state = newstate
    return true
 end
 
@@ -211,7 +246,7 @@ function ConnectX4:new (conf)
 
    for _, queue in ipairs(conf.queues) do
       -- Create a shared memory object for controlling the queue pair
-      local cxq = create_cxq("group/pci/"..pciaddress.."/"..queue.id)
+      local cxq = shm.create("group/pci/"..pciaddress.."/"..queue.id, cxq_t)
 
       cxq.rlkey = rlkey
       cxq.sqsize = sendq_size
@@ -232,6 +267,9 @@ function ConnectX4:new (conf)
       cxq.rqn = hca:create_rq(rcqn, pd, recvq_size, cxq.doorbell, cxq.rwq)
       hca:modify_sq(cxq.sqn, 0, 1) -- RESET -> READY
       hca:modify_rq(cxq.rqn, 0, 1) -- RESET -> READY
+
+      -- CXQ is now fully initialized & ready for attach.
+      assert(transition(cxq, BUSY, FREE))
 
       -- XXX collect for flow table construction
       rqs[queue.id] = cxq.rqn
@@ -524,7 +562,7 @@ local eqe_t = ffi.typeof([[
     uint16_t pad;
     uint8_t signature;
     uint8_t owner;
-  } ]])
+  } ]] )
 
 eq = {}
 eq.__index = eq
@@ -838,45 +876,61 @@ function IO:new (conf)
 
    -- Close the queue mapping.
    local function close ()
-      print("CLOSE")
       shm.unmap(cxq)
-      online = false
+      cxq = nil
    end
 
    -- Open the queue mapping.
    local function open ()
-      print("opening "..pciaddress.." queue "..queue)
       local shmpath = "group/pci/"..pciaddress.."/"..queue
       if shm.exists(shmpath) then
          cxq = shm.open(shmpath, cxq_t)
-         sq = SQ:new(cxq, mmio)
-         rq = RQ:new(cxq)
-         online = true
+         if transition(cxq, FREE, IDLE) then
+            sq = SQ:new(cxq, mmio)
+            rq = RQ:new(cxq)
+         else
+            close()             -- Queue was not FREE.
+         end
       end
    end
 
-   -- Check for online/offline queue state change.
-   -- Return true if the queue is online.
-   local function check_online ()
-      if not online and open_throttle() then
+   -- Return true on successful activation of the queue.
+   local function activate ()
+      -- If not open then make a request on a regular schedule.
+      if cxq == nil and open_throttle() then
          open()
       end
-      return online
+      if cxq then
+         -- Careful: Control app may have closed the CXQ.
+         if transition(cxq, IDLE, BUSY) then
+            return true
+         else
+            assert(cxq.state == DEAD, "illegal state detected")
+            close()
+         end
+      end
+   end
+
+   -- Enter the idle state.
+   local function deactivate ()
+      assert(transition(cxq, BUSY, IDLE))
    end
 
    -- Send packets to the NIC
    function self:push ()
-      if check_online() then
+      if activate() then
          sq:transmit(self.input.input or self.input.rx)
          sq:reclaim()
+         deactivate()
       end
    end
 
    -- Receive packets from the NIC.
    function self:pull ()
-      if check_online() then
+      if activate() then
          rq:receive(self.output.output or self.output.tx)
          rq:refill()
+         deactivate()
       end
    end
 
@@ -916,30 +970,31 @@ local rwqe_t = ffi.typeof[[
 
 function RQ:new (cxq)
    local rq = {}
-   -- Additional state
-   local packets = ffi.new("struct packet *[?]", cxq.rqsize)
-   local next_buffer = 0        -- next position for a buffer in wqe
-   local next_completion = 0    -- next completion queue position to process
-   local mine = 0               -- cqe ownership bit meaning software-owned
+
+   local mask = cxq.rqsize - 1
+   -- Return the transmit queue slot for the given WQE ID.
+   local function slot (wqeid)
+      return band(wqeid, mask)
+   end
 
    -- Refill with buffers
    function rq:refill ()
       local notify = false      -- have to notify NIC with doorbell ring?
-      while packets[next_buffer % cxq.rqsize] == nil do
+      while cxq.rx[slot(cxq.next_rx_wqeid)] == nil do
          local p = packet.allocate()
-         packets[next_buffer % cxq.rqsize] = p
-         local rwqe = cxq.rwq[next_buffer % cxq.rqsize]
+         cxq.rx[slot(cxq.next_rx_wqeid)] = p
+         local rwqe = cxq.rwq[slot(cxq.next_rx_wqeid)]
          local phy = memory.virtual_to_physical(p.data)
          rwqe.length = bswap(packet.max_payload)
          rwqe.lkey = bswap(cxq.rlkey)
          rwqe.dma_hi = bswap(tonumber(shr(phy, 32)))
          rwqe.dma_lo  = bswap(tonumber(band(phy, 0xFFFFFFFF)))
-         next_buffer = (next_buffer + 1) % 65536
+         cxq.next_rx_wqeid = cxq.next_rx_wqeid + 1
          notify = true
       end
       if notify then
          -- ring doorbell
-         cxq.doorbell[0].receive = bswap(next_buffer)
+         cxq.doorbell.receive = bswap(cxq.next_rx_wqeid)
       end
    end
 
@@ -947,32 +1002,32 @@ function RQ:new (cxq)
       local limit = engine.pull_npackets
       while limit > 0 and not link.full(l) do
          -- Find the next completion entry.
-         local c = cxq.rcq[next_completion]
+         local c = cxq.rcq[cxq.next_rx_cqeid]
          local owner = bit.band(1, c.u8[0x3F])
-         if owner ~= mine then
+         if owner ~= cxq.rx_mine then
             -- Completion entry is not available yet.
             break
          end
          limit = limit - 1
          -- Advance to next completion.
          -- Note: assumes sqsize == cqsize
-         next_completion = (next_completion + 1) % cxq.rqsize
+         cxq.next_rx_cqeid = slot(cxq.next_rx_cqeid + 1)
          -- Toggle the ownership value if the CQ wraps around.
-         if next_completion == 0 then
-            mine = (mine + 1) % 2
+         if cxq.next_rx_cqeid == 0 then
+            cxq.rx_mine = (cxq.rx_mine + 1) % 2
          end
          -- Decode the completion entry.
          local opcode = shr(c.u8[0x3F], 4)
          local len = bswap(c.u32[0x2C/4])
-         local wqe = shr(bswap(c.u32[0x3C/4]), 16)
-         local idx = wqe % cxq.rqsize
+         local wqeid = shr(bswap(c.u32[0x3C/4]), 16)
+         local idx = slot(wqeid)
          if opcode == 0 or opcode == 2 then
             -- Successful receive
-            assert(packets[idx] ~= nil)
-            local p = packets[idx]
+            local p = cxq.rx[idx]
+            assert(p ~= nil)
             p.length = len
             link.transmit(l, p)
-            packets[idx] = nil
+            cxq.rx[idx] = nil
          elseif opcode == 13 or opcode == 14 then
             local syndromes = {
                [0x1] = "Local_Length_Error",
@@ -1014,23 +1069,32 @@ function SQ:new (cxq, mmio)
    local sq = {}
    -- Cast pointers to expected types
    local mmio = ffi.cast("uint8_t*", mmio)
-   -- Additional state
-   local packets = ffi.new("struct packet *[?]", cxq.sqsize)
-   local next_packet = 0
-   local next_wqeid  = 0
-   -- Locate "blue flame" register areas for the UAR page
-   local bf_next = ffi.cast("uint64_t*", mmio + (cxq.uar * 4096) + 0x800)
-   local bf_alt  = ffi.cast("uint64_t*", mmio + (cxq.uar * 4096) + 0x900)
+   cxq.bf_next = ffi.cast("uint64_t*", mmio + (cxq.uar * 4096) + 0x800)
+   cxq.bf_alt  = ffi.cast("uint64_t*", mmio + (cxq.uar * 4096) + 0x900)
+
+   local mask = cxq.sqsize - 1
+   -- Return the transmit queue slot for the given WQE ID.
+   -- (Transmit queue is a smaller power of two than max WQE ID.)
+   local function slot (wqeid)
+      return band(wqeid, mask)
+   end
 
    -- Transmit packets from the link onto the send queue.
    function sq:transmit (l)
-      local start_wqeid = next_wqeid
-      while not link.empty(l) and packets[next_packet] == nil do
+      local start_wqeid = cxq.next_tx_wqeid
+      local next_slot = slot(start_wqeid)
+      while not link.empty(l) and cxq.tx[next_slot] == nil do
          local p = link.receive(l)
-         local wqe = cxq.swq[next_packet]
-         packets[next_packet] = p
+         local wqe = cxq.swq[next_slot]
+         -- Store packet pointer so that we can free it later
+         cxq.tx[next_slot] = p
+
+         -- Construct a 64-byte transmit descriptor.
+         -- This is in three parts: Control, Ethernet, Data.
+         -- The Ethernet part includes some inline data.
+
          -- Control segment
-         wqe.u32[0] = bswap(shl(next_wqeid, 8) + 0x0A)
+         wqe.u32[0] = bswap(shl(cxq.next_tx_wqeid, 8) + 0x0A)
          wqe.u32[1] = bswap(shl(cxq.sqn, 8) + 4)
          wqe.u32[2] = bswap(shl(2, 2)) -- completion always
          -- Ethernet segment
@@ -1044,16 +1108,16 @@ function SQ:new (cxq, mmio)
          wqe.u32[14] = bswap(tonumber(phy) / 2^32)
          wqe.u32[15] = bswap(tonumber(phy) % 2^32)
          -- Advance counters
-         next_wqeid = (next_wqeid + 1) % 65536
-         next_packet = next_wqeid % cxq.sqsize
+         cxq.next_tx_wqeid = cxq.next_tx_wqeid + 1
+         next_slot = slot(cxq.next_tx_wqeid)
       end
       -- Ring the doorbell if we enqueued new packets.
-      if next_wqeid ~= start_wqeid then
-         local current_packet = (next_packet + cxq.sqsize-1) % cxq.sqsize
-         cxq.doorbell.send = bswap(next_wqeid)
-         bf_next[0] = cxq.swq[current_packet].u64[0]
+      if cxq.next_tx_wqeid ~= start_wqeid then
+         local current_packet = slot(cxq.next_tx_wqeid + cxq.sqsize-1)
+         cxq.doorbell.send = bswap(cxq.next_tx_wqeid)
+         cxq.bf_next[0] = cxq.swq[current_packet].u64[0]
          -- Switch next/alternate blue flame register for next time
-         bf_next, bf_alt = bf_alt, bf_next
+         cxq.bf_next, cxq.bf_alt = cxq.bf_alt, cxq.bf_next
       end
    end
 
@@ -1065,10 +1129,10 @@ function SQ:new (cxq, mmio)
       local wqeid = shr(bswap(c.u32[0x3C/4]), 16)
       if opcode == 0x0A then
          while next_reclaim ~= wqeid % cxq.sqsize do
-            assert(packets[next_reclaim] ~= nil)
-            packet.free(packets[next_reclaim])
-            packets[next_reclaim] = nil
-            next_reclaim = (next_reclaim + 1) % cxq.sqsize
+            assert(cxq.tx[next_reclaim] ~= nil)
+            packet.free(cxq.tx[next_reclaim])
+            cxq.tx[next_reclaim] = nil
+            next_reclaim = slot(next_reclaim + 1)
          end
       end
    end
