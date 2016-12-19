@@ -1800,12 +1800,12 @@ function selftest ()
    print("payload snippets of first 5 packets")
    print("port0")
    for i = 1, 5 do
-      local p = link.receive(i0)
+      local p = link.receive(o0)
       if p then print(p.length, lib.hexdump(ffi.string(p.data, math.min(32, p.length)))) end
    end
    print("port1")
    for i = 1, 5 do
-      local p = link.receive(i1)
+      local p = link.receive(o1)
       if p then print(p.length, lib.hexdump(ffi.string(p.data, math.min(32, p.length)))) end
    end
 
