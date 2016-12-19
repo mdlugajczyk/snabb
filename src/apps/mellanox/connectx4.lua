@@ -1227,7 +1227,7 @@ function HCA:set_flow_table_entry_macvlan (table_id, table_type, group_id, flow_
       :input("group_id",     0x40 + 0x04,  31,  0, group_id)
       :input("action",       0x40 + 0x0C,  15,  0, 4) -- action = FWD_DST
       :input("dest_list_sz", 0x40 + 0x10,  23,  0, 1) -- destination list size
-      :input("dmac0",        0x40 + 0x48,  31,  0, shr(dmac, 16))
+      :input("dmac0",        0x40 + 0x48,  31,  0, math.floor(dmac/2^16))
       :input("dmac1",        0x40 + 0x4C,  31, 16, band(dmac, 0xFFFF))
       :input("vlan",         0x40 + 0x4C,  11,  0, vlanid or 0)
       :input("dest_type",    0x40 + 0x300, 31, 24, 2)
