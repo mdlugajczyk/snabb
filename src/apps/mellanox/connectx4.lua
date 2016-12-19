@@ -1204,7 +1204,7 @@ function HCA:create_flow_group_macvlan (table_id, table_type, start_ix, end_ix)
       :input("match_criteria", 0x3C,         7,  0, 1) -- match outer headers
       :input("dmac0",          0x40 + 0x08, 31,  0, 0xFFFFFFFF)
       :input("dmac1",          0x40 + 0x0C, 31, 16, 0xFFFF)
-      :input("vlanid",         0x40 + 0x0C, 11,  0, 0xFFF)
+--      :input("vlanid",         0x40 + 0x0C, 11,  0, 0xFFF)
       :execute()
    local group_id = self:output(0x08, 23, 0)
    return group_id
@@ -1223,7 +1223,7 @@ function HCA:set_flow_table_entry_macvlan (table_id, table_type, group_id, flow_
       :input("dest_list_sz", 0x40 + 0x10,  23,  0, 1) -- destination list size
       :input("dmac0",        0x40 + 0x48,  31,  0, shr(dmac, 16))
       :input("dmac1",        0x40 + 0x4C,  31, 16, band(dmac, 0xFFFF))
-      :input("vlan",         0x40 + 0x4C,  11,  0, vlanid)
+--      :input("vlan",         0x40 + 0x4C,  11,  0, vlanid)
       :input("dest_type",    0x40 + 0x300, 31, 24, 2)
       :input("dest_id",      0x40 + 0x300, 23,  0, tir)
       :execute()
