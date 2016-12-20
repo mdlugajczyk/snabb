@@ -1003,8 +1003,8 @@ function RQ:new (cxq)
    end
 
    function rq:receive (l)
-      local limit = engine.pull_npackets
-      while limit > 0 and not link.full(l) do
+      local limit = 80
+      while limit > 0 and link.nreadable(l) <= 80 do
          -- Find the next completion entry.
          local c = cxq.rcq[cxq.next_rx_cqeid]
          local owner = bit.band(1, c.u8[0x3F])
