@@ -1247,3 +1247,5 @@ QPTC          0x08680 +0x4*0..15  RC Queue Packets Transmitted Count
 QBTC_L        0x08700 +0x8*0..15  RC Queue Bytes Transmitted Count Low
 QBTC_H        0x08704 +0x8*0..15  RC Queue Bytes Transmitted Count High
 ]]
+
+table.setreadonly(getfenv())
