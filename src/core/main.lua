@@ -132,6 +132,9 @@ function initialize ()
    _G.packet = require("core.packet")
    _G.timer  = require("core.timer")
    _G.main   = getfenv()
+   for _, t in ipairs({packet, link, memory}) do
+      table.setreadonly(t)
+   end
 end
 
 function handler (reason)
