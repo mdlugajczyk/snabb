@@ -1,6 +1,6 @@
 /*
 ** Lua parser (source code -> bytecode).
-** Copyright (C) 2005-2015 Mike Pall. See Copyright Notice in luajit.h
+** Copyright (C) 2005-2016 Mike Pall. See Copyright Notice in luajit.h
 **
 ** Major portions taken verbatim or adapted from the Lua interpreter.
 ** Copyright (C) 1994-2008 Lua.org, PUC-Rio. See Copyright Notice in lua.h
@@ -1799,6 +1799,10 @@ static void expr_table(LexState *ls, ExpDesc *e)
 	}
       }
     }
+    /* set the template table as readonly */
+    if (t->colo == 0) {
+      lj_tab_set_readonly(ls->L, t);
+    }
     lj_gc_check(fs->L);
   }
 }
@@ -2177,6 +2181,8 @@ static void assign_adjust(LexState *ls, BCReg nvars, BCReg nexps, ExpDesc *e)
       bcemit_nil(fs, reg, (BCReg)extra);
     }
   }
+  if (nexps > nvars)
+    ls->fs->freereg -= nexps - nvars;  /* Drop leftover regs. */
 }
 
 /* Recursively parse assignment statement. */
@@ -2210,8 +2216,6 @@ static void parse_assignment(LexState *ls, LHSVarList *lh, BCReg nvars)
       return;
     }
     assign_adjust(ls, nvars, nexps, &e);
-    if (nexps > nvars)
-      ls->fs->freereg -= nexps - nvars;  /* Drop leftover regs. */
   }
   /* Assign RHS to LHS and recurse downwards. */
   expr_init(&e, VNONRELOC, ls->fs->freereg-1);
