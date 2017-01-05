@@ -110,4 +110,6 @@ function VirtioVirtq:signal_used ()
    end
 end
 
+table.setreadonly(VirtioVirtq)
+
 return VirtioVirtq

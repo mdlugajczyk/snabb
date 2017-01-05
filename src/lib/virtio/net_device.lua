@@ -529,3 +529,6 @@ end
 function debug (...)
    if _G.developer_debug then print(...) end
 end
+
+table.setreadonly(getfenv())
+
