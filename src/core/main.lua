@@ -16,6 +16,8 @@ local C   = ffi.C
 -- (e.g. FFI type name conflict between Snabb and ljsyscall)
 local S = require("syscall")
 
+require("jit.opt").start("-loop") -- disable loop optimization
+
 require("lib.lua.strict")
 require("lib.lua.class")
 
