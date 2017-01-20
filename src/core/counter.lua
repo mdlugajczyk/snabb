@@ -114,3 +114,4 @@ function selftest ()
    print("selftest ok")
 end
 
+return require("core.lib").sealed(getfenv())

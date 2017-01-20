@@ -738,6 +738,17 @@ function parse (arg, config)
    return ret
 end
 
+function sealed (table)
+   local new = {}
+   for k, v in pairs(table) do
+      new[k] = v
+   end
+   local t = ffi.typeof("struct {}")
+   ffi.metatype(t, {__index = new})
+   return ffi.new(t)
+end
+
+
 function selftest ()
    print("selftest: lib")
    print("Testing equal")

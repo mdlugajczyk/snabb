@@ -269,3 +269,5 @@ function selftest ()
    check_slow_shift(packet_alignment, shiftleft,
                     packet_alignment - default_headroom, default_headroom)
 end
+
+return require("core.lib").sealed(getfenv())
