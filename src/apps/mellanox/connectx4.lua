@@ -179,6 +179,8 @@ function ConnectX4:new (conf)
    --local tir = hca:create_tir_direct(rqlist[1], tdomain)
    local rqt = hca:create_rqt(rqlist)
    local tir = hca:create_tir_indirect(rqt, tdomain)
+   -- XXX Just for test coverage
+   hca:modify_rqt(rqt, rqlist)
 
    -- Setup packet dispatching.
    -- Just a "wildcard" flow group to send RX packets to the receive queue.
@@ -618,6 +620,15 @@ function HCA:create_rqt (rqlist)
    end
    self:execute()
    return self:output(0x08, 23, 0)
+end
+
+function HCA:modify_rqt (rqt, rqlist)
+   self:command("MODIFY_RQT", 0x20 + 0xF0 + 4*rqt_max_size, 0x0C)
+      :input("opcode",          0x00,        31, 16, 0x917)
+   for i = 0, rqt_max_size-1 do
+      self:input("rq_num["..i.."]", 0x20 + 0xF0 + i*4, 23, 0, rqlist[1 + (i % #rqlist)])
+   end
+   self:execute()
 end
 
 -- Create TIS (Transport Interface Send)
