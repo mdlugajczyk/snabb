@@ -99,7 +99,7 @@ deallocated (freed) during processing. This does not necessarily
 correspond directly to ingress or egress packets on a given interface.
 ]])
 
-local event_breath_initialized = define_event('trace', [[initialized breath
+local event_breath_initialized = define_event('trace', [[initialized breath at $unixnanos
 The engine has completed initialization for the breath: synchronized
 the current time and handled any pending error recovery.]])
 
@@ -109,6 +109,11 @@ The engine polled its timers and executed any that were expired.]])
 local event_commit_counters = define_event('trace', [[commit counters
 The engine commits the latest counter values to externally visible
 shared memory.]])
+
+-- Table to be populated with per-link events
+local events_link_packet = {}
+
+local event_packet_length = define_event('app', [[packet length $bytes]])
 
 -- Breathing regluation to reduce CPU usage when idle by calling usleep(3).
 --
@@ -306,6 +311,7 @@ function apply_config_actions (actions, conf)
       if not new_app_table[ta] then error("no such app: " .. ta) end
       -- Create or reuse a link and assign/update receiving app index
       local link = link_table[linkspec] or link.new(linkspec)
+      events_link_packet[link] = define_event('app', "packet data $a $b $c $d on "..linkspec)
       link.receiving_app = app_name_to_index[ta]
       -- Add link to apps
       new_app_table[fa].output[fl] = link
@@ -397,7 +403,7 @@ function breathe ()
    -- Restart: restart dead apps
    restart_dead_apps()
    -- Inhale: pull work into the app network
-   event_breath_initialized()
+   event_breath_initialized(C.get_time_ns())
    for i = 1, #app_array do
       local app = app_array[i]
 --      if app.pull then
@@ -422,10 +428,20 @@ function breathe ()
       local progress = false
       -- For each link that has new data, run the receiving app
       for i = 1, #link_array do
-         local link = link_array[i]
-         if firstloop or link.has_new_data then
-            link.has_new_data = false
-            local receiver = app_array[link.receiving_app]
+         local l = link_array[i]
+         if firstloop or l.has_new_data then
+            if l.has_new_data and tl.enabled(timeline, 'app') then
+               local p = link.front(l)
+               if p ~= nil then
+                  event_packet_length(p.length)
+                  local u64 = ffi.cast("uint64_t*", p.data)
+                  for n = 0, p.length/8, 4 do
+                     events_link_packet[l](u64[n], u64[n+1], u64[n+2], u64[n+3])
+                  end
+               end
+            end
+            l.has_new_data = false
+            local receiver = app_array[l.receiving_app]
             if receiver.push and not receiver.dead then
                zone(receiver.zone)
                if tl.enabled(timeline, 'trace') then
