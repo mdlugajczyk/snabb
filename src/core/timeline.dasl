@@ -158,7 +158,7 @@ function dump (filename,  maxentries)
    -- Print column headers.
    -- Note: "-cycles" column is time delta between entries (moving backwards in time)
    --print(("%4s %4s %12s %-16s %s"):format("numa", "core", "cycles", "category", "message"))
-   print("numa;core;tsc;category;message;instructions;cycles;refcycles;l1hit;l2hit;l3hit;l3miss")
+   print("numa;core;tsc;category;message;arg0;arg1;arg2;arg3;pmcfixed0;pmcfixed1;pmcfixed2;pmc0;pmc1;pmc2;pmc3;pmc4;pmc5;pmc6;pmc7")
    -- Search for the first entry i.e. with lowest timestamp
    local index, stamp = 0, ring[0].tsc
    for i = 1, last do
@@ -195,7 +195,9 @@ function dump (filename,  maxentries)
       print(("%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s"):format(
             numa, core, ("%d"):format(tonumber(ring[index].tsc)), category, summarize(format),
             tonumber(ring[index].msg0), tonumber(ring[index].msg1), tonumber(ring[index].msg2), tonumber(ring[index].msg3),
-            pmc.fixed2, pmc.fixed0, pmc.fixed1, pmc.general0, pmc.general1, pmc.general2, pmc.general3))
+            pmc.fixed2, pmc.fixed0, pmc.fixed1,
+            pmc.general0, pmc.general1, pmc.general2, pmc.general3,
+            pmc.general4, pmc.general5, pmc.general6, pmc.general7))
       --[[
       print(("%-4d %-4d %12s %-16s %s"):format(
             numa, core, timedelta, category, message))
