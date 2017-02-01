@@ -362,7 +362,7 @@ event = ffi.cast("void(*)(struct timeline_header *, uint64_t, uint64_t, uint64_t
 
 _anchor = mcode
 
-dasm.dump(mcode, size)
+--dasm.dump(mcode, size)
 
 function selftest ()
    print("selftest: timeline")
