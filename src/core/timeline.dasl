@@ -99,8 +99,8 @@ function new (shmpath,  num_entries, size_stringtable)
    local stringtable = ffi.cast("char*", memory + size_header + size_entries)
    -- Fill in header values
    header.magic = 0xa3ff7223441d0001ULL
-   header.major_version = 3
-   header.minor_version = 0
+   header.major_version = major
+   header.minor_version = minor
    header.log_bytes = size_entries
    header.strings_bytes = size_stringtable
    -- Private state

@@ -152,6 +152,8 @@ end
 
 -- Run in benchmark mode.
 function bench (pciaddr, confpath, sockpath, worker, npackets)
+   require("jit.dump").start("+r", "jit.dump")
+
    local ports = lib.load_conf(confpath)
    local nic = (nfvconfig.port_name(ports[1])).."_NIC"
 
@@ -166,6 +168,9 @@ function bench (pciaddr, confpath, sockpath, worker, npackets)
          packets = input.rxpackets
          bytes = input.rxbytes
          start = C.get_monotonic_time()
+
+         require("lib.traceprof.traceprof").start()
+
          if os.getenv("NFV_PROF") then
             require("jit.p").start(os.getenv("NFV_PROF"), os.getenv("NFV_PROF_FILE"))
          else
@@ -194,6 +199,7 @@ function bench (pciaddr, confpath, sockpath, worker, npackets)
    print(("Processed %.1f million packets in %.2f seconds (%d bytes; %.2f Gbps)"):format(packets / 1e6, runtime, bytes, bytes * 8.0 / 1e9 / runtime))
    print(("Made %s breaths: %.2f packets per breath; %.2fus per breath"):format(lib.comma_value(breaths), packets / breaths, runtime / breaths * 1e6))
    print(("Rate(Mpps):\t%.3f"):format(packets / runtime / 1e6))
+   require("lib.traceprof.traceprof").stop()
    require("jit.p").stop()
 end
 
