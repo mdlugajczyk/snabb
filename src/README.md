@@ -355,8 +355,8 @@ packets are allocated and freed.
 
 ```
 struct packet {
-    uint8_t  data[packet.max_payload];
     uint16_t length;
+    uint8_t  data[packet.max_payload];
 };
 ```
 
@@ -393,18 +393,21 @@ error is raised if there is not enough space in *packet* to accomodate
 — Function **packet.prepend** *packet*, *pointer*, *length*
 
 Prepends *length* bytes starting at *pointer* to the front of
-*packet*. An error is raised if there is not enough space in *packet* to
+*packet*, taking ownership of the packet and returning a new packet.
+An error is raised if there is not enough space in *packet* to
 accomodate *length* additional bytes.
 
 — Function **packet.shiftleft** *packet*, *length*
 
-Truncates *packet* by *length* bytes from the front. *Length* must be less than
-or equal to `length` of *packet*.
+Take ownership of *packet*, truncate it by *length* bytes from the
+front, and return a new packet. *Length* must be less than or equal to
+`length` of *packet*.
 
 — Function **packet.shiftright** *packet*, *length*
 
-Moves *packet* payload to the right by *length* bytes, growing *packet* by
-*length*. The sum of *length* and `length` of *packet* must be less than or
+Take ownership of *packet*, moves *packet* payload to the right by
+*length* bytes, growing *packet* by *length*. Returns a new packet.
+The sum of *length* and `length` of *packet* must be less than or
 equal to `packet.max_payload`.
 
 — Function **packet.from_pointer** *pointer*, *length*
@@ -812,18 +815,15 @@ Returns a table that acts as a bounds checked wrapper around a C array of
 ctype and the caller must ensure that the allocated memory region at
 *base*/*offset* is at least `sizeof(type)*size` bytes long.
 
-— Function **lib.timer** *duration*, *mode*, *timefun*
+— Function **lib.throttle** *seconds*
 
-Returns a closure that will return `false` until *duration* has elapsed. If
-*mode* is `'repeating'` the timer will reset itself after returning `true`,
-thus implementing an interval timer. *Timefun* is used to get a monotonic time.
-*Timefun* defaults to `C.get_time_ns`.
+Return a closure that returns `true` at most once during any *seconds*
+(a floating point value) time interval, otherwise false.
 
-The “deadline” for a given *duration* is computed by adding *duration* to the
-result of calling *timefun*, and is saved in the resulting closure. A
-*duration* has elapsed when its deadline is less than or equal the value
-obtained using *timefun* when calling the closure.
+— Function **lib.timeout** *seconds*
 
+Returns a closure that returns `true` if *seconds* (a floating point
+value) have elapsed since it was created, otherwise false.
 
 — Function **lib.waitfor** *condition*
 
