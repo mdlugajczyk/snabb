@@ -1,6 +1,6 @@
 /*
 ** JIT library.
-** Copyright (C) 2005-2015 Mike Pall. See Copyright Notice in luajit.h
+** Copyright (C) 2005-2017 Mike Pall. See Copyright Notice in luajit.h
 */
 
 #define lib_jit_c
@@ -204,6 +204,7 @@ LJLIB_CF(jit_util_funcinfo)
     lua_setfield(L, -2, "source");
     lj_debug_pushloc(L, pt, pc);
     lua_setfield(L, -2, "loc");
+    setprotoV(L, lj_tab_setstr(L, t, lj_str_newlit(L, "proto")), pt);
   } else {
     GCfunc *fn = funcV(L->base);
     GCtab *t;
@@ -635,6 +636,34 @@ static int luaopen_jit_profile(lua_State *L)
 
 #endif
 
+/* -- jit.vmprofile module  ----------------------------------------------- */
+
+#ifdef LUAJIT_VMPROFILE
+
+#define LJLIB_MODULE_jit_vmprofile
+
+LJLIB_CF(jit_vmprofile_start)
+{
+  luaJIT_vmprofile_start(L);
+  return 0;
+}
+
+LJLIB_CF(jit_vmprofile_stop)
+{
+  luaJIT_vmprofile_stop(L);
+  return 0;
+}
+
+#include "lj_libdef.h"
+
+static int luaopen_jit_vmprofile(lua_State *L)
+{
+  LJ_LIB_REG(L, NULL, jit_vmprofile);
+  return 1;
+}
+
+#endif
+
 /* -- JIT compiler initialization ----------------------------------------- */
 
 #if LJ_HASJIT
@@ -673,6 +702,11 @@ static uint32_t jit_cpudetect(lua_State *L)
       uint32_t fam = (features[0] & 0x0ff00f00);
       if (fam >= 0x00000f00)  /* K8, K10. */
 	flags |= JIT_F_PREFER_IMUL;
+    }
+    if (vendor[0] >= 7) {
+      uint32_t xfeatures[4];
+      lj_vm_cpuid(7, xfeatures);
+      flags |= ((xfeatures[1] >> 8)&1) * JIT_F_BMI2;
     }
 #endif
   }
@@ -716,15 +750,19 @@ static uint32_t jit_cpudetect(lua_State *L)
 #if LJ_HASJIT
   /* Compile-time MIPS CPU detection. */
 #if LJ_ARCH_VERSION >= 20
-  flags |= JIT_F_MIPS32R2;
+  flags |= JIT_F_MIPSXXR2;
 #endif
   /* Runtime MIPS CPU detection. */
 #if defined(__GNUC__)
-  if (!(flags & JIT_F_MIPS32R2)) {
+  if (!(flags & JIT_F_MIPSXXR2)) {
     int x;
+#ifdef __mips16
+    x = 0;  /* Runtime detection is difficult. Ensure optimal -march flags. */
+#else
     /* On MIPS32R1 rotr is treated as srl. rotr r2,r2,1 -> srl r2,r2,1. */
     __asm__("li $2, 1\n\t.long 0x00221042\n\tmove %0, $2" : "=r"(x) : : "$2");
-    if (x) flags |= JIT_F_MIPS32R2;  /* Either 0x80000000 (R2) or 0 (R1). */
+#endif
+    if (x) flags |= JIT_F_MIPSXXR2;  /* Either 0x80000000 (R2) or 0 (R1). */
   }
 #endif
 #endif
@@ -760,6 +798,10 @@ LUALIB_API int luaopen_jit(lua_State *L)
 #if LJ_HASPROFILE
   lj_lib_prereg(L, LUA_JITLIBNAME ".profile", luaopen_jit_profile,
 		tabref(L->env));
+#endif
+#ifdef LUAJIT_VMPROFILE
+  lj_lib_prereg(L, LUA_JITLIBNAME ".vmprofile", luaopen_jit_vmprofile,
+                tabref(L->env));
 #endif
 #ifndef LUAJIT_DISABLE_JITUTIL
   lj_lib_prereg(L, LUA_JITLIBNAME ".util", luaopen_jit_util, tabref(L->env));
