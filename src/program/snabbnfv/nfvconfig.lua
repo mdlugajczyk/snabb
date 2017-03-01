@@ -25,7 +25,7 @@ function load_control (ports, pciaddr)
    end
    if driver == 'apps.mellanox.connectx4' then
       config.app(c, "iocontrol",
-                 connectx4.ConnectX4, {pciaddress = pciaddr, queues = queues, macvlan = false})
+                 connectx4.ConnectX4, {pciaddress = pciaddr, queues = queues, macvlan = true})
    end
    return c
 end

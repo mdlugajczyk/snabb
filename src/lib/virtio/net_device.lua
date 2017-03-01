@@ -53,8 +53,7 @@ local invalid_header_id = 0xffff
 --]]
 local supported_features = C.VIRTIO_F_ANY_LAYOUT +
                            C.VIRTIO_NET_F_CTRL_VQ +
-                           C.VIRTIO_NET_F_MQ +
-                           C.VIRTIO_NET_F_CSUM
+                           C.VIRTIO_NET_F_MQ
 --[[
    The following offloading flags are also available:
    VIRTIO_NET_F_CSUM
