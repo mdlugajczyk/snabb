@@ -19,6 +19,9 @@ The engine starts the traffic processing loop.
 The engine stops the traffic processing loop.
 
 
+5|randomized_log_level: level
+Chose a new timeline log level at random from a probability distribution.
+
 5|breath_start: breath totalpackets totalbytes totaletherbits
 The engine starts an iteration of the packet-processing event loop (a
 "breath".)
@@ -40,15 +43,11 @@ The engine has "pulled" new packets into the event loop for processing.
 4|breath_pushed:
 The engine has "pushed" packets one step through the processing network.
 
-5|breath_end: breath npackets bpp
+5|breath_end: breath totalpackets totalbytes totaletherbits
 The engine completes an iteration of the event loop (a "breath.")
 
-'packets' is the total number of packets processed during the breath.
-'bpp' is the average number bytes per packet.
-
-Note: 'packets' is an internal measure of how many packets were
-deallocated (freed) during processing. This does not necessarily
-correspond directly to ingress or egress packets on a given interface.
+The arguments are the same as for breath_start. (Take a delta to see
+how much work was done during the breath.)
 
 
 4|polled_timers:
