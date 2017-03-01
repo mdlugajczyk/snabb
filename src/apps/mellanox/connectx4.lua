@@ -1002,57 +1002,61 @@ function RQ:new (cxq)
       end
    end
 
+   local function have_input ()
+      local c = cxq.rcq[cxq.next_rx_cqeid]
+      local owner = bit.band(1, c.u8[0x3F])
+      return owner == cxq.rx_mine
+   end
+
    function rq:receive (l)
-      local limit = engine.pull_npackets
-      while limit > 0 and not link.full(l) do
-         -- Find the next completion entry.
-         local c = cxq.rcq[cxq.next_rx_cqeid]
-         local owner = bit.band(1, c.u8[0x3F])
-         if owner ~= cxq.rx_mine then
-            -- Completion entry is not available yet.
-            break
-         end
-         limit = limit - 1
-         -- Advance to next completion.
-         -- Note: assumes sqsize == cqsize
-         cxq.next_rx_cqeid = slot(cxq.next_rx_cqeid + 1)
-         -- Toggle the ownership value if the CQ wraps around.
-         if cxq.next_rx_cqeid == 0 then
-            cxq.rx_mine = (cxq.rx_mine + 1) % 2
-         end
-         -- Decode the completion entry.
-         local opcode = shr(c.u8[0x3F], 4)
-         local len = bswap(c.u32[0x2C/4])
-         local wqeid = shr(bswap(c.u32[0x3C/4]), 16)
-         local idx = slot(wqeid)
-         if opcode == 0 or opcode == 2 then
-            -- Successful receive
-            local p = cxq.rx[idx]
-            assert(p ~= nil)
-            p.length = len
-            link.transmit(l, p)
-            cxq.rx[idx] = nil
-         elseif opcode == 13 or opcode == 14 then
-            local syndromes = {
-               [0x1] = "Local_Length_Error",
-               [0x4] = "Local_Protection_Error",
-               [0x5] = "Work_Request_Flushed_Error",
-               [0x6] = "Memory_Window_Bind_Error",
-               [0x10] = "Bad_Response_Error",
-               [0x11] = "Local_Access_Error",
-               [0x12] = "Remote_Invalid_Request_Error",
-               [0x13] = "Remote_Access_Error",
-               [0x14] = "Remote_Operation_Error"
-            }
-            local syndrome = c.u8[0x37]
-            print(("Got error. opcode=%d syndrome=0x%x message=%s"):format(
-                  opcode, syndrome, syndromes[syndromes])) -- XXX
-            -- Error on receive
-            assert(packets[idx] ~= nil)
-            packet.free(packets[idx])
-            packets[idx] = nil
-         else
-            error(("Unexpected CQE opcode: %d (0x%x)"):format(opcode, opcode))
+      if have_input() then
+         local limit = engine.pull_npackets
+         while limit > 0 and not link.full(l) do
+            -- Find the next completion entry.
+            local c = cxq.rcq[cxq.next_rx_cqeid]
+            local owner = bit.band(1, c.u8[0x3F])
+            limit = limit - 1
+            -- Advance to next completion.
+            -- Note: assumes sqsize == cqsize
+            cxq.next_rx_cqeid = slot(cxq.next_rx_cqeid + 1)
+            -- Toggle the ownership value if the CQ wraps around.
+            if cxq.next_rx_cqeid == 0 then
+               cxq.rx_mine = (cxq.rx_mine + 1) % 2
+            end
+            -- Decode the completion entry.
+            local opcode = shr(c.u8[0x3F], 4)
+            local len = bswap(c.u32[0x2C/4])
+            local wqeid = shr(bswap(c.u32[0x3C/4]), 16)
+            local idx = slot(wqeid)
+            if opcode == 0 or opcode == 2 then
+               -- Successful receive
+               local p = cxq.rx[idx]
+               assert(p ~= nil)
+               p.length = len
+               link.transmit(l, p)
+               cxq.rx[idx] = nil
+            elseif opcode == 13 or opcode == 14 then
+               local syndromes = {
+                  [0x1] = "Local_Length_Error",
+                  [0x4] = "Local_Protection_Error",
+                  [0x5] = "Work_Request_Flushed_Error",
+                  [0x6] = "Memory_Window_Bind_Error",
+                  [0x10] = "Bad_Response_Error",
+                  [0x11] = "Local_Access_Error",
+                  [0x12] = "Remote_Invalid_Request_Error",
+                  [0x13] = "Remote_Access_Error",
+                  [0x14] = "Remote_Operation_Error"
+               }
+               local syndrome = c.u8[0x37]
+               print(("Got error. opcode=%d syndrome=0x%x message=%s"):format(
+                     opcode, syndrome, syndromes[syndromes])) -- XXX
+               -- Error on receive
+               assert(packets[idx] ~= nil)
+               packet.free(packets[idx])
+               packets[idx] = nil
+            else
+               error(("Unexpected CQE opcode: %d (0x%x)"):format(opcode, opcode))
+            end
          end
       end
    end
@@ -1128,15 +1132,14 @@ function SQ:new (cxq, mmio)
    local next_reclaim = 0
    -- Free packets when their transmission is complete.
    function sq:reclaim ()
-      local c = cxq.scq[0]
-      local opcode = c.u8[0x38]
-      local wqeid = shr(bswap(c.u32[0x3C/4]), 16)
+      local opcode = cxq.scq[0].u8[0x38]
       if opcode == 0x0A then
+         local wqeid = shr(bswap(cxq.scq[0].u32[0x3C/4]), 16)
          while next_reclaim ~= wqeid % cxq.sqsize do
             assert(cxq.tx[next_reclaim] ~= nil)
             packet.free(cxq.tx[next_reclaim])
             cxq.tx[next_reclaim] = nil
-            next_reclaim = slot(next_reclaim + 1)
+            next_reclaim = tonumber(slot(next_reclaim + 1))
          end
       end
    end
