@@ -388,9 +388,7 @@ function main (options)
 end
 
 local nextbreath
-local lastfrees = 0
-local lastfreebits = 0
-local lastfreebytes = 0
+local lastfrees = ffi.new('uint64_t[1]')
 -- Wait between breaths to keep frequency with Hz.
 function pace_breathing ()
    if Hz then
@@ -404,7 +402,7 @@ function pace_breathing ()
       end
       nextbreath = math.max(nextbreath + 1/Hz, monotonic_now)
    else
-      if lastfrees == counter.read(frees) then
+      if lastfrees[0] == counter.read(frees) then
          sleep = math.min(sleep + 1, maxsleep)
          events.sleep_on_idle(sleep)
          C.usleep(sleep)
@@ -412,17 +410,22 @@ function pace_breathing ()
       else
          sleep = math.floor(sleep/2)
       end
-      lastfrees = counter.read(frees)
-      lastfreebytes = counter.read(freebytes)
-      lastfreebits = counter.read(freebits)
+      lastfrees[0] = counter.read(frees)
    end
 end
 
 function breathe ()
-   local freed_packets0 = counter.read(frees)
-   local freed_bytes0 = counter.read(freebytes)
-   events.breath_start(counter.read(breaths), freed_packets0, freed_bytes0,
-                       counter.read(freebits))
+   -- Randomize the log level. Enable each level in 5x more breaths
+   -- than the level below by randomly picking from log5() distribution.
+   -- Goal is ballpark 1000 messages per second (~15min for 1M entries.)
+   --
+   -- Could be better to reduce the log level over time to "stretch"
+   -- logs for long running processes? Improvements possible :-).
+   local level = math.max(1, math.ceil(math.log(math.random(5^9))/math.log(5)))
+   timeline_mod.level(timeline_log, level)
+   events.randomized_log_level(level)
+   events.breath_start(counter.read(breaths),   counter.read(frees),
+                       counter.read(freebytes), counter.read(freebits))
    running = true
    monotonic_now = C.get_monotonic_time()
    -- Restart: restart dead apps
@@ -459,25 +462,14 @@ function breathe ()
       end
    end
    events.breath_pushed()
-   local freed
-   local freed_packets = counter.read(frees) - freed_packets0
-   local freed_bytes = (counter.read(freebytes) - freed_bytes0)
-   local freed_bytes_per_packet = freed_bytes / math.max(tonumber(freed_packets), 1)
-   events.breath_end(counter.read(breaths), freed_packets, freed_bytes_per_packet)
+   events.breath_end(counter.read(breaths),   counter.read(frees),
+                     counter.read(freebytes), counter.read(freebits))
    counter.add(breaths)
    -- Commit counters at a reasonable frequency
    if counter.read(breaths) % 100 == 0 then
       counter.commit()
       events.commited_counters()
    end
-   -- Randomize the log level. Enable each level in 5x more breaths
-   -- than the level below by randomly picking from log5() distribution.
-   -- Goal is ballpark 1000 messages per second (~15min for 1M entries.)
-   --
-   -- Could be better to reduce the log level over time to "stretch"
-   -- logs for long running processes? Improvements possible :-).
-   local level = math.max(1, math.ceil(math.log(math.random(5^9))/math.log(5)))
-   timeline_mod.level(timeline_log, level)
    running = false
 end
 
