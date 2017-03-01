@@ -35,8 +35,10 @@ local function call_timers (l)
       end
       timer.fn(timer)
       if timer.repeating then activate(timer) end
+      timer.events.ran_timer()
    end
 end
+
 function run_to_time (ns)
    local new_ticks = math.floor(tonumber(ns) / ns_per_tick)
    for tick = ticks, new_ticks do
@@ -65,7 +67,11 @@ function new (name, fn, nanos, mode)
    return { name = name,
             fn = fn,
             ticks = math.ceil(nanos / ns_per_tick),
-            repeating = (mode == 'repeating') }
+            repeating = (mode == 'repeating'),
+            events = timeline.load_events(engine.timeline(),
+                                          "core.timer",
+                                          {timer = name})
+   }
 end
 
 function selftest ()
