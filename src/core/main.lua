@@ -6,6 +6,8 @@ module(...,package.seeall)
 -- (Can be overridden with -P argument: see below.)
 package.path = ''
 
+require("jit.opt").start("-narrow")
+
 local STP = require("lib.lua.StackTracePlus")
 local ffi = require("ffi")
 local zone = require("jit.zone")
